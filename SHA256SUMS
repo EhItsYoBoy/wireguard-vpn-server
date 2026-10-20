@@ -1,0 +1,4 @@
+e239c98ca27cdc880eec205c1951aef39aafb6a3d0d4e4c4cec7cbfb1e79763f *setup-wireguard-server.sh
+164d5c9f05c851bd6e3135109a7737454cfebda8d98caf06e62028822f8e3811 *setup-wgdashboard.sh
+45785a27443e3ead33b47c02fbb3c792ab4e979ab83214ae955b23d8738f1d42 *setup-fail2ban.sh
+e75c297c8a567cd531897da94de329417df58ebeb264129aa24dfd684ec84777 *install-vpn-server.sh

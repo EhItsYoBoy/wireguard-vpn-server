@@ -1,0 +1,4 @@
+# Bash scripts break with Windows (CRLF) line endings; always store and check out LF.
+*.sh text eol=lf
+*.example text eol=lf
+SHA256SUMS text eol=lf

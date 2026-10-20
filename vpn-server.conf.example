@@ -1,0 +1,55 @@
+# Shared settings for install-vpn-server.sh and the three step scripts.
+# Copy to vpn-server.conf on the server, edit, then: sudo bash install-vpn-server.sh --config vpn-server.conf
+# Format: KEY=VALUE, one per line. The file is parsed, never executed. Do not put passwords here.
+# Leave a line commented out to use the auto-detected value or the default shown.
+
+# ----- Step 1: WireGuard server -----
+# Public IPv4 or DNS name that clients connect to (required).
+PUBLIC_ENDPOINT=vpn.example.net
+
+# IPv4 hosts/networks allowed to SSH in, space-separated. Default: the IP of your current SSH session.
+# Include every admin location; anything else is dropped by the firewall.
+#ADMIN_CIDRS="198.51.100.10/32 203.0.113.0/28"
+
+# yes = also allow SSH from VPN clients: a way back in if your public IP changes.
+#SSH_FROM_VPN=no
+
+# Existing non-root sudo user with a tested SSH key. Default: the user who ran sudo.
+#ADMIN_USER=vpnadmin
+
+# Default: the running sshd port. This suite never changes it.
+#SSH_PORT=22
+
+# Default: the interface of the default route.
+#WAN_IF=ens3
+# Private /24 that must not overlap any network you or your clients use.
+#VPN_NET=10.77.0.0/24
+#VPN_PORT=51820
+# Public DNS resolver pushed to clients.
+#DNS_IPV4=1.1.1.1
+# Default: yes when the WAN address is DHCP-assigned.
+#ALLOW_DHCP=yes
+
+# First client profile created on the server, or 'none' to create all clients in WGDashboard.
+#CLIENT_NAME=client1
+# Optional public key generated on the client device (its private key never leaves the device).
+#CLIENT_PUBLIC_KEY=
+
+# ----- Step 2: WGDashboard -----
+# 1 = do not install WGDashboard (Fail2ban then protects SSH only).
+#SKIP_DASHBOARD=0
+# Pinned release tag.
+#DASHBOARD_VERSION=v4.3.3
+# ssh-tunnel: dashboard on 127.0.0.1 only, reached through an SSH tunnel (most secure).
+# vpn:        dashboard on the VPN server address, reachable by DASHBOARD_ALLOWED_CIDRS over the VPN.
+#DASHBOARD_ACCESS=ssh-tunnel
+#DASHBOARD_PORT=10086
+#DASHBOARD_USER=admin
+# vpn mode only. Default: the whole VPN_NET.
+#DASHBOARD_ALLOWED_CIDRS=10.77.0.2/32
+# The password is prompted for during install (or set DASHBOARD_PASSWORD in the environment).
+
+# ----- Step 3: Fail2ban -----
+# Never banned. Default: loopback plus ADMIN_CIDRS.
+#IGNORE_IPS="127.0.0.1/8 ::1 198.51.100.10/32"
+#BANACTION=iptables-multiport

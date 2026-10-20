@@ -1,0 +1,3 @@
+# Real per-server settings stay on the server, never in the repo.
+vpn-server.conf
+*.log
