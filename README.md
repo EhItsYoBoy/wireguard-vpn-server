@@ -13,7 +13,7 @@ Builds a dedicated Ubuntu 24.04+ WireGuard server with a configurable SSH login 
 
 1. You need a fresh Ubuntu 24.04 (or newer) server with no Docker, UFW rules, or other firewall in use. Have the cloud provider's web console open in case you lock yourself out.
 
-   An existing **WireGuard client** on the server is fine if it only routes specific networks (split tunnel). The installer leaves its config untouched, puts the server on the next free interface (e.g. `wg1`), and refuses to run if:
+   An existing **WireGuard client** on the server is fine if it only routes specific networks (split tunnel). The installer leaves its config untouched, puts the server on the next free interface (e.g. `wg1`; choose the name with `VPN_IF` in the config), and refuses to run if:
    - the client routes all traffic (`AllowedIPs = 0.0.0.0/0`)
    - the client's addresses overlap `VPN_NET`
    - the client already uses UDP port `VPN_PORT`
@@ -32,14 +32,14 @@ To tighten this later, set these in the config file: `ALLOW_ROOT_LOGIN=no`, `ALL
 ## Install
 
 ```bash
-BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.0
+BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.1
 curl -fsSLO "$BASE/install-vpn-server.sh"
 curl -fsSLO "$BASE/vpn-server.conf.example"
 cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # at least PUBLIC_ENDPOINT
 sudo bash install-vpn-server.sh --config vpn-server.conf
 ```
 
-> **Status:** v0.4.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
+> **Status:** v0.4.1 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
 
 Do **not** use `curl ... | sudo bash`. The WireGuard step reads confirmations from the keyboard, and piping takes the keyboard away.
 

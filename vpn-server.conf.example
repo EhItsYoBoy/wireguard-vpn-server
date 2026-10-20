@@ -25,6 +25,11 @@ PUBLIC_ENDPOINT=vpn.example.net
 # Default: the running sshd port. This suite never changes it.
 #SSH_PORT=22
 
+# Name of the VPN server's WireGuard interface (config file /etc/wireguard/<name>.conf).
+# Default: wg0, or the next free wgN if another WireGuard tunnel already uses wg0.
+# Letters, digits, _ and - only, at most 15 characters.
+#VPN_IF=wg1
+
 # Default: auto-detected (the interface used to reach the Internet). Set it only if detection fails.
 #WAN_IF=ens3
 # Private /24 that must not overlap any network you or your clients use.
