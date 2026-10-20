@@ -38,15 +38,22 @@ SERVICE="wg-dashboard.service"
 STATE="/root/wgdashboard-setup"
 WG_INSTALL_ENV="/root/wireguard-setup/install.env"
 FIREWALL_COMMENT="vpn: WGDashboard from VPN"
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN CLIENT_TO_CLIENT DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 RESET_PASSWORD=0
 GENERATED_PASSWORD=0
 
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-step() { printf '\n==> %s\n' "$*"; }
+# Colour only on a terminal (or when install-vpn-server.sh passes VPN_COLOR=1); NO_COLOR disables it.
+if [[ -z ${NO_COLOR:-} && ( -t 1 || ${VPN_COLOR:-} == 1 ) ]]; then
+    RED=$'\e[1;31m' GREEN=$'\e[1;32m' YELLOW=$'\e[1;33m' CYAN=$'\e[1;36m' BOLD=$'\e[1m' RESET=$'\e[0m'
+else
+    RED="" GREEN="" YELLOW="" CYAN="" BOLD="" RESET=""
+fi
+die() { printf '%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+warn() { printf '%sWARNING:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+step() { printf '\n%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
+ok() { printf '%s✔%s %s\n' "$GREEN" "$RESET" "$*"; }
 
 usage() {
     sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"
@@ -157,9 +164,9 @@ choose_password() {
     if [[ -z "$DASHBOARD_PASSWORD" ]]; then
         [[ -t 0 ]] || die 'Set DASHBOARD_PASSWORD or run interactively to choose the dashboard password.'
         local again
-        read -r -s -p "Dashboard password for '$DASHBOARD_USER' (blank = generate): " DASHBOARD_PASSWORD; echo
+        read -r -s -p "${YELLOW}Dashboard password for '$DASHBOARD_USER' (blank = generate):${RESET} " DASHBOARD_PASSWORD; echo
         if [[ -n "$DASHBOARD_PASSWORD" ]]; then
-            read -r -s -p 'Repeat password: ' again; echo
+            read -r -s -p "${YELLOW}Repeat password:${RESET} " again; echo
             [[ "$DASHBOARD_PASSWORD" == "$again" ]] || die 'Passwords do not match.'
         fi
     fi
@@ -333,7 +340,7 @@ verify() {
     [[ -n "$listening" ]] || { journalctl -u "$SERVICE" -n 30 --no-pager >&2; die "WGDashboard is not listening on port $DASHBOARD_PORT."; }
     [[ "$listening" == "$LISTEN_IP:$DASHBOARD_PORT" ]] \
         || die "WGDashboard listens on $listening, expected $LISTEN_IP:$DASHBOARD_PORT. Do not expose it publicly."
-    echo "Listening on $listening"
+    ok "Listening on $listening"
     if [[ -n "$DASHBOARD_PASSWORD" ]]; then
         # Confirms the stored hash works. The password travels on stdin, never on a command line.
         response=$(printf '%s' "$DASHBOARD_PASSWORD" \
@@ -341,7 +348,7 @@ verify() {
             | curl -s --max-time 10 -H 'Content-Type: application/json' --data-binary @- \
                 "http://$LISTEN_IP:$DASHBOARD_PORT/api/authenticate" || true)
         if [[ "$response" == *'"status":true'* || "$response" == *'"status": true'* ]]; then
-            echo 'Login check passed.'
+            ok 'Login check passed.'
         else
             warn 'Could not confirm the login automatically; sign in manually to check.'
         fi
@@ -349,16 +356,18 @@ verify() {
 }
 
 summary() {
-    printf '\nWGDashboard %s installed in %s\n' "$DASHBOARD_VERSION" "$INSTALL_DIR"
+    echo
+    ok "WGDashboard $DASHBOARD_VERSION installed in $INSTALL_DIR"
     if [[ "$DASHBOARD_ACCESS" == vpn ]]; then
-        printf 'Access: connect to the VPN from %s, then browse http://%s:%s\n' "$DASHBOARD_ALLOWED_CIDRS" "$SERVER_IP" "$DASHBOARD_PORT"
+        printf '%sAccess:%s connect to the VPN from %s, then browse http://%s:%s\n' \
+            "$CYAN" "$RESET" "$DASHBOARD_ALLOWED_CIDRS" "$SERVER_IP" "$DASHBOARD_PORT"
     else
-        printf 'Access: from your workstation run\n  ssh -N -L 127.0.0.1:%s:127.0.0.1:%s <admin>@%s\nthen browse http://127.0.0.1:%s\n' \
-            "$DASHBOARD_PORT" "$DASHBOARD_PORT" "$PUBLIC_ENDPOINT" "$DASHBOARD_PORT"
+        printf '%sAccess:%s from your workstation run\n  %sssh -N -L 127.0.0.1:%s:127.0.0.1:%s <admin>@%s%s\nthen browse http://127.0.0.1:%s\n' \
+            "$CYAN" "$RESET" "$BOLD" "$DASHBOARD_PORT" "$DASHBOARD_PORT" "$PUBLIC_ENDPOINT" "$RESET" "$DASHBOARD_PORT"
     fi
-    printf 'Username: %s\n' "$DASHBOARD_USER"
-    (( ! GENERATED_PASSWORD )) || printf 'Generated password saved to %s/credentials (mode 600). Move it to your password manager, then delete it.\n' "$STATE"
-    echo 'Next: enable TOTP in the dashboard settings, and run setup-fail2ban.sh.'
+    printf '%sUsername:%s %s\n' "$CYAN" "$RESET" "$DASHBOARD_USER"
+    (( ! GENERATED_PASSWORD )) || printf '%sGenerated password%s saved to %s/credentials (mode 600). Move it to your password manager, then delete it.\n' "$CYAN" "$RESET" "$STATE"
+    printf '%sNext:%s enable TOTP in the dashboard settings, and run setup-fail2ban.sh.\n' "$YELLOW" "$RESET"
 }
 
 main() {

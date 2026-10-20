@@ -32,14 +32,14 @@ To tighten this later, set these in the config file: `ALLOW_ROOT_LOGIN=no`, `ALL
 ## Install
 
 ```bash
-BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.1
+BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.5.0
 curl -fsSLO "$BASE/install-vpn-server.sh"
 curl -fsSLO "$BASE/vpn-server.conf.example"
-cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # at least PUBLIC_ENDPOINT
+cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # optional: every setting has a default
 sudo bash install-vpn-server.sh --config vpn-server.conf
 ```
 
-> **Status:** v0.4.1 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
+> **Status:** v0.5.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
 
 Do **not** use `curl ... | sudo bash`. The WireGuard step reads confirmations from the keyboard, and piping takes the keyboard away.
 
@@ -69,7 +69,7 @@ sudo vpn-firewall-save                      # save firewall changes; never use '
 2. Regenerate the checksums **after** that edit, then commit, tag and push:
    ```bash
    sha256sum setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh install-vpn-server.sh > SHA256SUMS
-   git add -A && git commit -m "Release v0.5.0" && git tag v0.5.0 && git push origin main --tags
+   git add -A && git commit -m "Release v0.6.0" && git tag v0.6.0 && git push origin main --tags
    ```
 
 Always install from a tag, never from `main`. Never move or re-push an existing tag: servers that pinned it would get different code.

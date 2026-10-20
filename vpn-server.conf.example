@@ -4,8 +4,12 @@
 # Leave a line commented out to use the auto-detected value or the default shown.
 
 # ----- Step 1: WireGuard server -----
-# Public IPv4 or DNS name that clients connect to (required).
-PUBLIC_ENDPOINT=vpn.example.net
+# Public IPv4 or DNS name that clients connect to. Default: this server's public IPv4, detected
+# automatically. Set a DNS name here if you want clients to keep working when the IP changes.
+#PUBLIC_ENDPOINT=vpn.example.net
+
+# yes = VPN clients can connect to each other (default). no = clients are isolated from each other.
+#CLIENT_TO_CLIENT=yes
 
 # IPv4 networks allowed to SSH in, space-separated. Default: 0.0.0.0/0 (anywhere). Login is key-only
 # and Fail2ban bans brute-force sources. Listing specific networks instead also exempts them from bans.

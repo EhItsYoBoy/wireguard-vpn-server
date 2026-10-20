@@ -8,7 +8,7 @@
 # Steps that already completed are skipped, so it is safe to re-run after fixing a failure.
 #
 # Usage (on the server, in an interactive SSH session; do NOT pipe into bash, step 1 needs the keyboard):
-#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.1/install-vpn-server.sh
+#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.5.0/install-vpn-server.sh
 #   sudo bash install-vpn-server.sh [--config FILE] [--check] [--skip-dashboard]
 #
 #   --config FILE     shared KEY=VALUE settings for all steps (see vpn-server.conf.example)
@@ -21,13 +21,13 @@ set -euo pipefail
 umask 077
 
 # Raw GitHub URL of the tagged release holding these scripts. Pin a tag or commit, never a branch.
-VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.1}"
+VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.5.0}"
 # Optional: sha256 of the SHA256SUMS file itself, so a changed release is refused.
 VPN_SCRIPTS_SHA256="${VPN_SCRIPTS_SHA256:-}"
 
 STEP_SCRIPTS=(setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh)
 WG_STATE=/root/wireguard-setup
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN CLIENT_TO_CLIENT DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-}"
@@ -35,9 +35,19 @@ CONFIG=""
 CHECK_ONLY=0
 SCRIPT_DIR=""
 
-die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-banner() { printf '\n==================== %s ====================\n' "$*"; }
+# Colour only on a terminal; NO_COLOR disables it. VPN_COLOR tells the step scripts to keep colour
+# even though their output passes through the log pipe below.
+if [[ -z ${NO_COLOR:-} && -t 1 ]]; then
+    RED=$'\e[1;31m' GREEN=$'\e[1;32m' YELLOW=$'\e[1;33m' BLUE=$'\e[1;34m' BOLD=$'\e[1m' RESET=$'\e[0m'
+    export VPN_COLOR=1
+else
+    RED="" GREEN="" YELLOW="" BLUE="" BOLD="" RESET=""
+    export VPN_COLOR=0
+fi
+die() { printf '\n%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+warn() { printf '%sWARNING:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+banner() { printf '\n%s==================== %s ====================%s\n' "$BLUE" "$*" "$RESET"; }
+section() { printf '%s%s%s\n' "$BOLD" "$*" "$RESET"; }
 
 usage() { sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; }
 
@@ -131,7 +141,7 @@ preflight() {
     if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" != yes ]]; then
         warn 'System clock is not NTP-synchronised.'
     fi
-    echo 'Preflight passed.'
+    printf '%sPreflight passed.%s\n' "$GREEN" "$RESET"
 }
 
 run_step() {
@@ -144,16 +154,16 @@ run_step() {
 # Health check
 # ---------------------------------------------------------------------------
 FAILURES=0
-pass() { printf '  [PASS] %s\n' "$*"; }
-fail() { printf '  [FAIL] %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
-note() { printf '  [WARN] %s\n' "$*"; }
+pass() { printf '  %s[PASS]%s %s\n' "$GREEN" "$RESET" "$*"; }
+fail() { printf '  %s[FAIL]%s %s\n' "$RED" "$RESET" "$*"; FAILURES=$((FAILURES + 1)); }
+note() { printf '  %s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*"; }
 check() { local label=$1; shift; if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi; }
 
 health_check() {
     banner 'Health check'
     local rules sshd_config jails listen port
     FAILURES=0
-    echo 'WireGuard'
+    section 'WireGuard'
     local vpn_if
     vpn_if=$(awk -F'"' '/^VPN_IF=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null)
     vpn_if=${vpn_if:-wg0}
@@ -165,12 +175,17 @@ health_check() {
     check 'IPv4 forwarding on' test "$(sysctl -n net.ipv4.ip_forward)" = 1
     check 'IPv6 disabled' test "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1
 
-    echo 'Firewall'
+    section 'Firewall'
     rules=$(iptables -w -S 2>/dev/null || true)
     check 'INPUT policy DROP' grep -qx -- '-P INPUT DROP' <<< "$rules"
     check 'FORWARD policy DROP' grep -qx -- '-P FORWARD DROP' <<< "$rules"
     check 'SSH access rule present' grep -q 'vpn: SSH access' <<< "$rules"
     check 'NAT rule present' bash -c "iptables -w -t nat -S | grep -q 'vpn: NAT only VPN to WAN'"
+    if [[ "$(awk -F'"' '/^CLIENT_TO_CLIENT=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null)" == no ]]; then
+        if grep -q 'vpn: client to client' <<< "$rules"; then fail 'clients isolated (CLIENT_TO_CLIENT=no)'; else pass 'clients isolated (CLIENT_TO_CLIENT=no)'; fi
+    else
+        check 'client-to-client rule present' grep -q 'vpn: client to client' <<< "$rules"
+    fi
     check 'netfilter-persistent enabled' systemctl is-enabled netfilter-persistent
     check 'saved rules include the VPN policy' grep -q 'vpn: Internet exit' /etc/iptables/rules.v4
     if grep -q 'f2b-' /etc/iptables/rules.v4 2>/dev/null; then
@@ -179,7 +194,7 @@ health_check() {
         pass 'saved rules exclude Fail2ban chains'
     fi
 
-    echo 'SSH'
+    section 'SSH'
     sshd_config=$(sshd -T 2>/dev/null || true)
     # Compare the live SSH policy with what was chosen at install time (default: both allowed).
     local want_root=yes want_password=yes
@@ -190,7 +205,7 @@ health_check() {
     [[ "${want_password:-yes}" == no ]] || note 'password login is enabled; Fail2ban is the brute-force protection'
 
     if systemctl cat wg-dashboard.service >/dev/null 2>&1; then
-        echo 'WGDashboard'
+        section 'WGDashboard'
         check 'wg-dashboard running' systemctl is-active wg-dashboard
         check 'wg-dashboard starts at boot' systemctl is-enabled wg-dashboard
         port=$(awk -F' *= *' '$1 == "app_port" { print $2 }' /opt/WGDashboard/src/wg-dashboard.ini 2>/dev/null | tr -d '\r')
@@ -204,7 +219,7 @@ health_check() {
         fi
     fi
 
-    echo 'Fail2ban'
+    section 'Fail2ban'
     check 'fail2ban running' systemctl is-active fail2ban
     jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p')
     check 'sshd jail active' grep -qw sshd <<< "$jails"
@@ -213,15 +228,15 @@ health_check() {
         check 'dashboard login exporter running' systemctl is-active wgdashboard-fail2ban-export
     fi
 
-    echo 'Maintenance'
+    section 'Maintenance'
     check 'unattended security upgrades enabled' grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades
     if [[ -e /var/run/reboot-required ]]; then note 'reboot required to finish updates; schedule one and re-run --check'; else pass 'no reboot pending'; fi
 
     if (( FAILURES )); then
-        printf '\n%d check(s) failed.\n' "$FAILURES"
+        printf '\n%s%d check(s) failed.%s\n' "$RED" "$FAILURES" "$RESET"
         return 1
     fi
-    printf '\nAll checks passed.\n'
+    printf '\n%sAll checks passed.%s\n' "$GREEN" "$RESET"
 }
 
 # ---------------------------------------------------------------------------
@@ -241,7 +256,8 @@ main() {
     if (( CHECK_ONLY )); then health_check; return; fi
 
     log="/root/vpn-install-$(date -u +%Y%m%dT%H%M%SZ).log"
-    exec > >(tee -a "$log") 2>&1
+    # Show colour on screen; strip the colour codes from the log file so it stays plain text.
+    exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$log")) 2>&1
     echo "Logging to $log"
 
     locate_scripts
@@ -270,7 +286,7 @@ main() {
     banner 'Done'
     cat <<EOF
 Log: $log
-Next steps:
+${BOLD}Next steps:${RESET}
   * Open UDP $(awk -F'"' '/^VPN_PORT=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null || echo 51820) in the cloud provider's firewall.
   * Copy client profiles from $WG_STATE/clients securely, then delete the server copies.
   * Reboot in a maintenance window, then run: sudo bash $0 --check

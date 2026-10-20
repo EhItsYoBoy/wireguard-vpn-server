@@ -18,7 +18,7 @@
 set -euo pipefail
 umask 077
 
-PUBLIC_ENDPOINT="${PUBLIC_ENDPOINT:-}"     # Public IPv4 or DNS name clients connect to
+PUBLIC_ENDPOINT="${PUBLIC_ENDPOINT:-}"     # Public IPv4 or DNS name clients connect to; default: detected public IPv4
 WAN_IF="${WAN_IF:-}"                       # Auto-detected from the route to the Internet
 ADMIN_CIDRS="${ADMIN_CIDRS:-${ADMIN_IP:-}}" # IPv4 networks allowed to SSH; default 0.0.0.0/0 (anywhere, Fail2ban-protected)
 ADMIN_USER="${ADMIN_USER:-}"               # Account you SSH in as; default: $SUDO_USER, or root when run as root
@@ -32,20 +32,29 @@ VPN_PORT="${VPN_PORT:-}"                   # UDP listen port
 ALLOW_DHCP="${ALLOW_DHCP:-}"               # yes/no; default: yes if the WAN address is DHCP-assigned
 CLIENT_NAME="${CLIENT_NAME:-}"             # First client profile name, or 'none' to add clients later (e.g. WGDashboard)
 CLIENT_PUBLIC_KEY="${CLIENT_PUBLIC_KEY:-}" # Optional client-generated public key; blank = generate the key here
+CLIENT_TO_CLIENT="${CLIENT_TO_CLIENT:-}"   # yes (default) = VPN clients may connect to each other; no = isolated
 
 VPN_IF="${VPN_IF:-}"                       # Server interface; default: wg0, or the next free wgN
 VPN_SERVICE=""                             # wg-quick@$VPN_IF, set once VPN_IF is chosen
 STATE="/root/wireguard-setup"
 # Every setting used by the install suite, so one shared config file works for all scripts.
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN CLIENT_TO_CLIENT DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 BACKUP=""
 ROLLBACK_UNIT=""
 ARMED=0
 
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
+# Colour only on a terminal (or when install-vpn-server.sh passes VPN_COLOR=1); NO_COLOR disables it.
+if [[ -z ${NO_COLOR:-} && ( -t 1 || ${VPN_COLOR:-} == 1 ) ]]; then
+    RED=$'\e[1;31m' GREEN=$'\e[1;32m' YELLOW=$'\e[1;33m' CYAN=$'\e[1;36m' BOLD=$'\e[1m' RESET=$'\e[0m'
+else
+    RED="" GREEN="" YELLOW="" CYAN="" BOLD="" RESET=""
+fi
+die() { printf '%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+warn() { printf '%sWARNING:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+info() { printf '%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
+ok() { printf '%s✔%s %s\n' "$GREEN" "$RESET" "$*"; }
 
 usage() {
     cat <<'EOF'
@@ -78,14 +87,14 @@ load_config() {
 ask_if_missing() {
     local variable=$1 label=$2 value
     [[ -z "${!variable}" ]] || return 0
-    read -r -p "$label: " value
+    read -r -p "${YELLOW}${label}:${RESET} " value
     printf -v "$variable" '%s' "$value"
     [[ -n "${!variable}" ]] || die "$variable is required."
 }
 
 confirm() {
     local answer
-    read -r -p "$1 Type YES: " answer
+    read -r -p "${YELLOW}$1${RESET} Type ${BOLD}YES${RESET}: " answer
     [[ "$answer" == YES ]] || die 'Cancelled.'
 }
 
@@ -111,6 +120,37 @@ detect_wan_if() {
     candidates=$(ip -4 -o address show scope global 2>/dev/null | awk '{ print $2 }' | sort -u)
     [[ $(wc -l <<< "$candidates") -eq 1 && -n "$candidates" ]] && echo "$candidates"
     return 0
+}
+
+# Print this server's public IPv4 address. Uses the WAN interface address when it is public;
+# otherwise (VPS behind 1:1 NAT, e.g. AWS, GCP, Oracle) asks external "what is my IP" services.
+detect_public_ip() {
+    python3 - "$WAN_IF" <<'PY' 2>/dev/null || true
+import ipaddress, json, subprocess, sys, urllib.request
+wan = sys.argv[1]
+if wan:
+    try:
+        out = subprocess.run(['ip', '-j', '-4', 'address', 'show', 'dev', wan],
+                             capture_output=True, text=True, timeout=5).stdout
+        for link in json.loads(out or '[]'):
+            for address in link.get('addr_info', []):
+                ip = ipaddress.IPv4Address(address['local'])
+                if ip.is_global:
+                    print(ip)
+                    sys.exit(0)
+    except Exception:
+        pass
+for url in ('https://api4.ipify.org', 'https://ipv4.icanhazip.com', 'https://ifconfig.me/ip'):
+    try:
+        request = urllib.request.Request(url, headers={'User-Agent': 'curl/8'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            ip = ipaddress.IPv4Address(response.read().decode().strip())
+        if ip.is_global:
+            print(ip)
+            sys.exit(0)
+    except Exception:
+        continue
+PY
 }
 
 # Print the first wgN name with neither a config file nor a live interface, so an existing
@@ -150,13 +190,22 @@ collect_settings() {
     VPN_NET=${VPN_NET:-10.77.0.0/24}
     VPN_PORT=${VPN_PORT:-51820}
     CLIENT_NAME=${CLIENT_NAME:-client1}
+    CLIENT_TO_CLIENT=${CLIENT_TO_CLIENT:-yes}
 
-    ask_if_missing PUBLIC_ENDPOINT 'Public VPN IPv4 or DNS hostname'
     if [[ -z "$WAN_IF" ]]; then
-        echo 'Could not detect the WAN interface. Interfaces with IPv4 addresses:'
+        warn 'Could not detect the WAN interface. Interfaces with IPv4 addresses:'
         ip -4 -brief address show | grep -v '^lo ' || true
     fi
     ask_if_missing WAN_IF 'WAN interface (the one with the public IP)'
+    if [[ -z "$PUBLIC_ENDPOINT" ]]; then
+        PUBLIC_ENDPOINT=$(detect_public_ip)
+        if [[ -n "$PUBLIC_ENDPOINT" ]]; then
+            info "Detected public IP: ${BOLD}$PUBLIC_ENDPOINT${RESET} (set PUBLIC_ENDPOINT to use a DNS name instead)"
+        else
+            warn 'Could not detect the public IP address.'
+        fi
+    fi
+    ask_if_missing PUBLIC_ENDPOINT 'Public VPN IPv4 or DNS hostname'
     ask_if_missing ADMIN_USER 'Account you log in to SSH with'
     validate_values
     NET_BASE=${VPN_NET%.*}
@@ -237,6 +286,7 @@ PY
     ) || die 'Settings validation failed (see message above).'
     [[ "$ALLOW_DHCP" == yes || "$ALLOW_DHCP" == no ]] || die 'ALLOW_DHCP must be yes or no.'
     [[ "$SSH_FROM_VPN" == yes || "$SSH_FROM_VPN" == no ]] || die 'SSH_FROM_VPN must be yes or no.'
+    [[ "$CLIENT_TO_CLIENT" == yes || "$CLIENT_TO_CLIENT" == no ]] || die 'CLIENT_TO_CLIENT must be yes or no.'
     [[ "$ALLOW_ROOT_LOGIN" == yes || "$ALLOW_ROOT_LOGIN" == no ]] || die 'ALLOW_ROOT_LOGIN must be yes or no.'
     [[ "$ALLOW_PASSWORD_LOGIN" == yes || "$ALLOW_PASSWORD_LOGIN" == no ]] || die 'ALLOW_PASSWORD_LOGIN must be yes or no.'
     if [[ "$ADMIN_USER" == root && "$ALLOW_ROOT_LOGIN" == no ]]; then
@@ -254,7 +304,7 @@ check_existing_wireguard() {
         [[ -e "$conf" ]] && others+=("$conf")
     done
     (( ${#others[@]} )) || return 0
-    printf 'Existing WireGuard config(s), left untouched: %s\n' "${others[*]##*/}"
+    info "Existing WireGuard config(s), left untouched: ${others[*]##*/}"
     # A full-tunnel client (AllowedIPs 0.0.0.0/0) routes the server's own replies into that tunnel,
     # breaking SSH and the VPN service for everyone.
     if grep -Eiq '^[[:space:]]*AllowedIPs[[:space:]]*=.*(^|[^0-9])0\.0\.0\.0/0' "${others[@]}"; then
@@ -348,19 +398,21 @@ for r in json.loads(sys.argv[2]):
         warn 'System clock is not NTP-synchronised; fix this before relying on logs and bans.'
     fi
 
-    printf '\n%-22s %s\n' \
+    printf '\n%sSettings%s\n' "$BOLD" "$RESET"
+    printf "  ${CYAN}%-22s${RESET} %s\n" \
         'Endpoint:' "$PUBLIC_ENDPOINT UDP $VPN_PORT" \
         'WAN interface:' "$WAN_IF (DHCP renewal allowed: $ALLOW_DHCP)" \
         'SSH:' "port $SSH_PORT as $ADMIN_USER from $( [[ $ADMIN_CIDRS == 0.0.0.0/0 ]] && echo 'anywhere (Fail2ban in step 3)' || echo "$ADMIN_CIDRS" )" \
         'SSH login:' "root allowed: $ALLOW_ROOT_LOGIN, passwords allowed: $ALLOW_PASSWORD_LOGIN" \
         'SSH from VPN clients:' "$SSH_FROM_VPN" \
         'VPN network:' "$VPN_NET (server $SERVER_IP on $VPN_IF)" \
+        'Client-to-client:' "$( [[ $CLIENT_TO_CLIENT == yes ]] && echo 'allowed' || echo 'blocked (clients isolated)' )" \
         'Client DNS:' "$DNS_IPV4" \
         'First client:' "$( [[ $CLIENT_NAME == none ]] && echo none || echo "$CLIENT_NAME $CLIENT_IP" )"
     echo
     if [[ " $ADMIN_CIDRS " == *" 0.0.0.0/0 "* ]]; then
-        echo 'SSH stays open to the Internet. Run setup-fail2ban.sh (step 3) right after this to ban'
-        echo 'brute-force sources; set ADMIN_CIDRS to restrict SSH to known networks instead.'
+        info 'SSH stays open to the Internet. Fail2ban (step 3) bans brute-force sources;'
+        info 'set ADMIN_CIDRS to restrict SSH to known networks instead.'
     fi
     if [[ "$ALLOW_PASSWORD_LOGIN" == yes ]]; then
         warn 'Password login stays enabled: use a long, unique password. An SSH key is still the safer option.'
@@ -442,13 +494,13 @@ ROLLBACK
     ROLLBACK_UNIT="vpn-setup-rollback-$(date +%s)-$$"
     systemd-run --quiet --unit="$ROLLBACK_UNIT" --on-active=10m "$BACKUP/rollback.sh"
     ARMED=1
-    printf 'Rollback armed for 10 minutes: %s\n' "$BACKUP/rollback.sh"
+    info "Rollback armed for 10 minutes: $BACKUP/rollback.sh"
 }
 
 on_exit() {
     local result=$?
     if [[ "$ARMED" == 1 && ! -e "$BACKUP/COMMITTED" ]]; then
-        printf '\nSetup did not commit. Rolling back firewall, SSH and sysctl changes; generated files are kept for inspection.\n' >&2
+        printf '\n%sSetup did not commit. Rolling back firewall, SSH and sysctl changes; generated files are kept for inspection.%s\n' "$RED" "$RESET" >&2
         bash "$BACKUP/rollback.sh" || printf 'Automatic rollback failed; use the provider console and saved state.\n' >&2
         systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
         printf 'Inspect %s before attempting another install. Packages are not removed.\n' "$STATE" >&2
@@ -557,9 +609,14 @@ apply_firewall() {
     done
     # Allow replies for connections that were permitted to start.
     iptables -w -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment 'vpn: established forwarding' -j ACCEPT
-    # Allow VPN clients to start Internet connections out of the WAN. Client-to-client (VPN_IF -> VPN_IF)
-    # traffic matches no ACCEPT rule, so clients are isolated from each other by the DROP policy.
+    # Allow VPN clients to start Internet connections out of the WAN.
     iptables -w -A FORWARD -i "$VPN_IF" -o "$WAN_IF" -s "$VPN_NET" -m comment --comment 'vpn: Internet exit' -j ACCEPT
+    # Allow VPN clients to start connections to each other (traffic in and out of the VPN interface).
+    # With CLIENT_TO_CLIENT=no this rule is skipped and the DROP policy isolates clients instead.
+    if [[ "$CLIENT_TO_CLIENT" == yes ]]; then
+        iptables -w -A FORWARD -i "$VPN_IF" -o "$VPN_IF" -s "$VPN_NET" -d "$VPN_NET" -m conntrack --ctstate NEW \
+            -m comment --comment 'vpn: client to client' -j ACCEPT
+    fi
 
     # ---------------- IPv4 NAT ----------------
     # Rewrite VPN client source addresses to the server's WAN address; nothing else is translated.
@@ -620,7 +677,8 @@ write_install_env() {
             "$PUBLIC_ENDPOINT" "$WAN_IF" "$VPN_IF" "$VPN_NET" "$VPN_PORT"
         printf 'SERVER_IP="%s"\nDNS_IPV4="%s"\nADMIN_CIDRS="%s"\nADMIN_USER="%s"\nSSH_PORT="%s"\nSSH_FROM_VPN="%s"\n' \
             "$SERVER_IP" "$DNS_IPV4" "$ADMIN_CIDRS" "$ADMIN_USER" "$SSH_PORT" "$SSH_FROM_VPN"
-        printf 'ALLOW_ROOT_LOGIN="%s"\nALLOW_PASSWORD_LOGIN="%s"\n' "$ALLOW_ROOT_LOGIN" "$ALLOW_PASSWORD_LOGIN"
+        printf 'ALLOW_ROOT_LOGIN="%s"\nALLOW_PASSWORD_LOGIN="%s"\nCLIENT_TO_CLIENT="%s"\n' \
+            "$ALLOW_ROOT_LOGIN" "$ALLOW_PASSWORD_LOGIN" "$CLIENT_TO_CLIENT"
     } > "$STATE/install.env"
     chmod 600 "$STATE/install.env"
 }
@@ -632,8 +690,9 @@ commit_setup() {
         iptables -w -C INPUT -i "$WAN_IF" -s "$admin" -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
             -m comment --comment 'vpn: SSH access' -j ACCEPT || die 'SSH access rule is missing.'
     done
-    printf '\nOpen a NEW SSH session as %s on port %s and check you have admin rights. Keep this session open.\n' "$ADMIN_USER" "$SSH_PORT"
-    read -r -t 300 -p 'After that succeeds, type CONFIRM to save the firewall and cancel rollback: ' answer \
+    printf '\n%s>>> Open a NEW SSH session as %s on port %s and check you have admin rights. Keep this session open.%s\n' \
+        "$YELLOW" "$ADMIN_USER" "$SSH_PORT" "$RESET"
+    read -r -t 300 -p "${YELLOW}After that succeeds, type ${BOLD}CONFIRM${RESET}${YELLOW} to save the firewall and cancel rollback:${RESET} " answer \
         || die 'Confirmation timed out.'
     [[ "$answer" == CONFIRM ]] || die 'New-session verification was not confirmed.'
     # A separate process takes the lock, so the rollback timer and this commit cannot race.
@@ -654,10 +713,11 @@ COMMIT
     systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
     ARMED=0
     write_install_env
-    printf '\nSetup committed. Backup/recovery state: %s\n' "$STATE"
-    printf 'Open UDP %s in the provider firewall. Test client traffic, denied access and a maintenance reboot.\n' "$VPN_PORT"
-    printf 'Disable/block native IPv6 on clients separately; disabling it on the server does not protect clients.\n'
-    printf 'After changing firewall rules later, save them with: sudo vpn-firewall-save\n'
+    echo
+    ok "Setup committed. Backup/recovery state: $STATE"
+    info "Open UDP $VPN_PORT in the provider firewall. Test client traffic, denied access and a maintenance reboot."
+    info 'Disable/block native IPv6 on clients separately; disabling it on the server does not protect clients.'
+    info "After changing firewall rules later, save them with: ${BOLD}vpn-firewall-save${RESET}"
 }
 
 main() {
@@ -675,16 +735,20 @@ main() {
     [[ -z "$config" ]] || load_config "$config"
     collect_settings
     preflight
+    info 'Installing and updating packages'
     install_packages
     arm_rollback
     trap on_exit EXIT
     trap 'exit 130' INT TERM
+    info 'Applying SSH policy and system settings'
     harden_host
+    info 'Applying firewall'
     apply_firewall
+    info "Creating WireGuard interface $VPN_IF"
     configure_wireguard
     commit_setup
     if [[ "$CLIENT_NAME" != none ]]; then
-        printf 'Client profile: %s/clients/%s.conf (mode 600). Transfer it securely; never paste it into notes.\n' "$STATE" "$CLIENT_NAME"
+        ok "Client profile: $STATE/clients/$CLIENT_NAME.conf (mode 600). Transfer it securely; never paste it into notes."
         [[ -z "$CLIENT_PUBLIC_KEY" ]] || echo 'The profile is a template: add the private key already stored on your client.'
     fi
 }

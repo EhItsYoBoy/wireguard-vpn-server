@@ -15,7 +15,7 @@ set -euo pipefail
 
 STATE_FILE=/var/lib/wgdashboard-fail2ban/cursor.json
 WG_INSTALL_ENV=/root/wireguard-setup/install.env
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN CLIENT_TO_CLIENT DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 
@@ -36,8 +36,14 @@ then $WG_INSTALL_ENV, then auto-detection:
 EOF
 }
 
-die() { echo "Error: $*" >&2; exit 1; }
-warn() { echo "Warning: $*" >&2; }
+# Colour only on a terminal (or when install-vpn-server.sh passes VPN_COLOR=1); NO_COLOR disables it.
+if [[ -z ${NO_COLOR:-} && ( -t 1 || ${VPN_COLOR:-} == 1 ) ]]; then
+ RED=$'\e[1;31m' GREEN=$'\e[1;32m' YELLOW=$'\e[1;33m' CYAN=$'\e[1;36m' DIM=$'\e[2m' RESET=$'\e[0m'
+else
+ RED="" GREEN="" YELLOW="" CYAN="" DIM="" RESET=""
+fi
+die() { printf '%sError:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+warn() { printf '%sWarning:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
 
 APPLY=0
 CONFIG_FILE=""
@@ -162,22 +168,23 @@ if [[ "$SKIP_DASHBOARD" != 1 ]]; then
  [[ -r "$WGDASHBOARD_DB" ]] || die "missing dashboard database: $WGDASHBOARD_DB"
 fi
 
-echo "Host:        $(hostname)"
-echo "SSH ports:   $SSH_PORT"
+label() { printf '%s%-12s%s %s\n' "$CYAN" "$1" "$RESET" "$2"; }
+label 'Host:' "$(hostname)"
+label 'SSH ports:' "$SSH_PORT"
 if [[ "$SKIP_DASHBOARD" == 1 ]]; then
- echo "Dashboard:   no jail"
+ label 'Dashboard:' 'no jail'
 else
- echo "Dashboard:   $WGDASHBOARD_DB (ports $WGDASHBOARD_PORT)"
+ label 'Dashboard:' "$WGDASHBOARD_DB (ports $WGDASHBOARD_PORT)"
 fi
-echo "Ban action:  $BANACTION"
-echo "Ignore IPs:  $IGNORE_IPS"
-if [[ -n "${SSH_CLIENT:-}" ]]; then
- echo "Note: this session comes from ${SSH_CLIENT%% *}; make sure IGNORE_IPS covers it to avoid locking yourself out."
+label 'Ban action:' "$BANACTION"
+label 'Ignore IPs:' "$IGNORE_IPS"
+if [[ -n "${SSH_CLIENT:-}" && " $IGNORE_IPS " != *" ${SSH_CLIENT%% *} "* ]]; then
+ warn "this session comes from ${SSH_CLIENT%% *}, which can be banned like any other address after 5 failed logins."
 fi
 echo
 
 # --- Helpers -----------------------------------------------------------------
-run() { if (( APPLY )); then "$@"; else printf '[dry-run] '; printf '%q ' "$@"; printf '\n'; fi; }
+run() { if (( APPLY )); then "$@"; else printf '%s[dry-run]%s ' "$YELLOW" "$RESET"; printf '%q ' "$@"; printf '\n'; fi; }
 
 TMP_FILES=()
 CREATED_FILES=()
@@ -186,7 +193,7 @@ cleanup() { (( ${#TMP_FILES[@]} )) && rm -f "${TMP_FILES[@]}"; return 0; }
 on_error() {
  local status=$?
  if [[ -n "$backup" ]]; then
-  echo "Failed (exit $status). Restore replaced files with: cp -a $backup/. /" >&2
+  printf '%sFailed (exit %s).%s Restore replaced files with: cp -a %s/. /\n' "$RED" "$status" "$RESET" "$backup" >&2
   (( ${#CREATED_FILES[@]} )) && echo "Remove newly created files with: rm -f ${CREATED_FILES[*]}" >&2
  fi
  exit "$status"
@@ -201,7 +208,7 @@ write_file() {
  TMP_FILES+=("$tmp")
  cat > "$tmp"
  if [[ -e "$path" ]] && cmp -s "$tmp" "$path"; then
-  echo "unchanged: $path"
+  printf '%sunchanged: %s%s\n' "$DIM" "$path" "$RESET"
   return 0
  fi
  if (( APPLY )); then
@@ -211,11 +218,11 @@ write_file() {
    CREATED_FILES+=("$path")
   fi
   install -D -m "$mode" "$tmp" "$path"
-  echo "wrote: $path"
+  printf '%swrote:%s %s\n' "$GREEN" "$RESET" "$path"
  elif [[ -e "$path" ]]; then
-  echo "[dry-run] update $path"; diff -u "$path" "$tmp" || true
+  printf '%s[dry-run] update%s %s\n' "$YELLOW" "$RESET" "$path"; diff -u "$path" "$tmp" || true
  else
-  echo "[dry-run] create $path"; cat "$tmp"
+  printf '%s[dry-run] create%s %s\n' "$YELLOW" "$RESET" "$path"; cat "$tmp"
  fi
 }
 
@@ -498,8 +505,8 @@ if (( APPLY )); then
  fi
  fail2ban-client status sshd
  [[ "$SKIP_DASHBOARD" == 1 ]] || fail2ban-client status wgdashboard
- echo "Completed. Backup of replaced files: $backup"
+ printf '%sCompleted.%s Backup of replaced files: %s\n' "$GREEN" "$RESET" "$backup"
  echo "Fail2ban chains are rebuilt at start-up; save other firewall changes with vpn-firewall-save, not netfilter-persistent save."
 else
- echo "Dry run complete. Re-run with --apply to make these changes."
+ printf '%sDry run complete.%s Re-run with --apply to make these changes.\n' "$YELLOW" "$RESET"
 fi
