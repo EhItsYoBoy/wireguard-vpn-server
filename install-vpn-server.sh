@@ -8,7 +8,7 @@
 # Steps that already completed are skipped, so it is safe to re-run after fixing a failure.
 #
 # Usage (on the server, in an interactive SSH session; do NOT pipe into bash, step 1 needs the keyboard):
-#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0/install-vpn-server.sh
+#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0/install-vpn-server.sh
 #   sudo bash install-vpn-server.sh [--config FILE] [--check] [--skip-dashboard]
 #
 #   --config FILE     shared KEY=VALUE settings for all steps (see vpn-server.conf.example)
@@ -21,13 +21,13 @@ set -euo pipefail
 umask 077
 
 # Raw GitHub URL of the tagged release holding these scripts. Pin a tag or commit, never a branch.
-VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0}"
+VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0}"
 # Optional: sha256 of the SHA256SUMS file itself, so a changed release is refused.
 VPN_SCRIPTS_SHA256="${VPN_SCRIPTS_SHA256:-}"
 
 STEP_SCRIPTS=(setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh)
 WG_STATE=/root/wireguard-setup
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-}"
@@ -178,8 +178,13 @@ health_check() {
 
     echo 'SSH'
     sshd_config=$(sshd -T 2>/dev/null || true)
-    check 'password login disabled' grep -qx 'passwordauthentication no' <<< "$sshd_config"
-    check 'root login disabled' grep -qx 'permitrootlogin no' <<< "$sshd_config"
+    # Compare the live SSH policy with what was chosen at install time (default: both allowed).
+    local want_root=yes want_password=yes
+    want_root=$(awk -F'"' '/^ALLOW_ROOT_LOGIN=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null)
+    want_password=$(awk -F'"' '/^ALLOW_PASSWORD_LOGIN=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null)
+    check "root login = ${want_root:-yes} (as configured)" grep -qx "permitrootlogin ${want_root:-yes}" <<< "$sshd_config"
+    check "password login = ${want_password:-yes} (as configured)" grep -qx "passwordauthentication ${want_password:-yes}" <<< "$sshd_config"
+    [[ "${want_password:-yes}" == no ]] || note 'password login is enabled; Fail2ban is the brute-force protection'
 
     if systemctl cat wg-dashboard.service >/dev/null 2>&1; then
         echo 'WGDashboard'

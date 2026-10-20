@@ -14,8 +14,13 @@ PUBLIC_ENDPOINT=vpn.example.net
 # yes = also allow SSH from VPN clients: a way back in if your public IP changes.
 #SSH_FROM_VPN=no
 
-# Existing non-root sudo user with a tested SSH key. Default: the user who ran sudo.
-#ADMIN_USER=vpnadmin
+# SSH login policy. Defaults keep root and password logins working; Fail2ban bans brute-force sources.
+# For stronger security, set both to "no" and log in as a sudo user with an SSH key.
+#ALLOW_ROOT_LOGIN=yes
+#ALLOW_PASSWORD_LOGIN=yes
+
+# Account you SSH in as. Default: the user who ran sudo, or root.
+#ADMIN_USER=root
 
 # Default: the running sshd port. This suite never changes it.
 #SSH_PORT=22

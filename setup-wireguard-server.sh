@@ -2,7 +2,7 @@
 # setup-wireguard-server.sh — step 1 of 3 (see install-vpn-server.sh)
 #
 # Fresh, dedicated Ubuntu 24.04+ IPv4 WireGuard server:
-#   * hardens SSH (keys only, no root login)
+#   * sets the SSH login policy (root and password logins configurable; Fail2ban protects them)
 #   * applies a commented iptables policy (default deny, VPN Internet exit, client isolation)
 #   * enables IPv4 forwarding and disables IPv6
 #   * creates wg0 and, optionally, the first client profile
@@ -19,7 +19,9 @@ umask 077
 PUBLIC_ENDPOINT="${PUBLIC_ENDPOINT:-}"     # Public IPv4 or DNS name clients connect to
 WAN_IF="${WAN_IF:-}"                       # Auto-detected from the route to the Internet
 ADMIN_CIDRS="${ADMIN_CIDRS:-${ADMIN_IP:-}}" # IPv4 networks allowed to SSH; default 0.0.0.0/0 (anywhere, Fail2ban-protected)
-ADMIN_USER="${ADMIN_USER:-}"               # Existing non-root sudo user with a tested SSH key; default: $SUDO_USER
+ADMIN_USER="${ADMIN_USER:-}"               # Account you SSH in as; default: $SUDO_USER, or root when run as root
+ALLOW_ROOT_LOGIN="${ALLOW_ROOT_LOGIN:-}"   # yes (default) = root may log in over SSH
+ALLOW_PASSWORD_LOGIN="${ALLOW_PASSWORD_LOGIN:-}" # yes (default) = passwords accepted as well as SSH keys
 SSH_PORT="${SSH_PORT:-}"                   # Existing sshd port (not changed); default: from 'sshd -T'
 SSH_FROM_VPN="${SSH_FROM_VPN:-}"           # yes = also allow SSH from VPN clients (backup path if your IP changes)
 DNS_IPV4="${DNS_IPV4:-}"                   # Public DNS resolver pushed to clients
@@ -33,7 +35,7 @@ VPN_IF="wg0"
 VPN_SERVICE="wg-quick@wg0"
 STATE="/root/wireguard-setup"
 # Every setting used by the install suite, so one shared config file works for all scripts.
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 BACKUP=""
@@ -47,8 +49,8 @@ usage() {
     cat <<'EOF'
 Usage: sudo bash setup-wireguard-server.sh [--config FILE]
 
-Fresh, dedicated Ubuntu 24.04+ hosts only. Requires an existing non-root sudo administrator
-with a tested SSH key. Existing VPN or firewall configurations are refused; this is not an
+Fresh, dedicated Ubuntu 24.04+ hosts only. Run as root or a sudo user you can already SSH in as.
+Existing VPN or firewall configurations are refused; this is not an
 upgrade or migration script. Settings: see the variables at the top of this file or
 vpn-server.conf.example. Confirmations cannot be bypassed.
 EOF
@@ -112,7 +114,10 @@ detect_wan_if() {
 collect_settings() {
     local sshd_config wan_addresses
     WAN_IF=${WAN_IF:-$(detect_wan_if)}
+    ALLOW_ROOT_LOGIN=${ALLOW_ROOT_LOGIN:-yes}
+    ALLOW_PASSWORD_LOGIN=${ALLOW_PASSWORD_LOGIN:-yes}
     ADMIN_USER=${ADMIN_USER:-${SUDO_USER:-}}
+    if [[ -z "$ADMIN_USER" && "$ALLOW_ROOT_LOGIN" == yes ]]; then ADMIN_USER=root; fi
     ADMIN_CIDRS=${ADMIN_CIDRS:-0.0.0.0/0}
     if [[ -z "$SSH_PORT" ]]; then
         sshd_config=$(/usr/sbin/sshd -T 2>/dev/null || true)
@@ -135,7 +140,7 @@ collect_settings() {
         ip -4 -brief address show | grep -v '^lo ' || true
     fi
     ask_if_missing WAN_IF 'WAN interface (the one with the public IP)'
-    ask_if_missing ADMIN_USER 'Existing non-root sudo administrator'
+    ask_if_missing ADMIN_USER 'Account you log in to SSH with'
     validate_values
     NET_BASE=${VPN_NET%.*}
     SERVER_IP="$NET_BASE.1"
@@ -199,8 +204,8 @@ if re.fullmatch(r'[0-9.]+', endpoint):
 for value in (port, ssh):
     if not (value.isdecimal() and 1 <= int(value) <= 65535):
         fail(f'Invalid port: {value}')
-if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}', user) or user == 'root':
-    fail('ADMIN_USER must be an existing non-root account')
+if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}', user):
+    fail('Invalid ADMIN_USER')
 if client != 'none' and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}', client):
     fail('Invalid CLIENT_NAME')
 if client_key:
@@ -215,6 +220,11 @@ PY
     ) || die 'Settings validation failed (see message above).'
     [[ "$ALLOW_DHCP" == yes || "$ALLOW_DHCP" == no ]] || die 'ALLOW_DHCP must be yes or no.'
     [[ "$SSH_FROM_VPN" == yes || "$SSH_FROM_VPN" == no ]] || die 'SSH_FROM_VPN must be yes or no.'
+    [[ "$ALLOW_ROOT_LOGIN" == yes || "$ALLOW_ROOT_LOGIN" == no ]] || die 'ALLOW_ROOT_LOGIN must be yes or no.'
+    [[ "$ALLOW_PASSWORD_LOGIN" == yes || "$ALLOW_PASSWORD_LOGIN" == no ]] || die 'ALLOW_PASSWORD_LOGIN must be yes or no.'
+    if [[ "$ADMIN_USER" == root && "$ALLOW_ROOT_LOGIN" == no ]]; then
+        die 'ADMIN_USER is root but ALLOW_ROOT_LOGIN=no would block that login. Use a non-root sudo user.'
+    fi
 }
 
 preflight() {
@@ -246,11 +256,20 @@ preflight() {
     fi
     ip link show dev "$WAN_IF" >/dev/null 2>&1 || die "WAN interface $WAN_IF does not exist."
     id "$ADMIN_USER" >/dev/null 2>&1 || die "User $ADMIN_USER does not exist."
-    groups=$(id -nG "$ADMIN_USER")
-    [[ " $groups " == *" sudo "* ]] || die "$ADMIN_USER must be a member of the sudo group."
-    admin_home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
-    [[ -s "$admin_home/.ssh/authorized_keys" ]] || die "Install and test an SSH key for $ADMIN_USER first."
-    ssh-keygen -l -f "$admin_home/.ssh/authorized_keys" >/dev/null 2>&1 || die 'No valid administrator SSH key found.'
+    if [[ "$ADMIN_USER" != root ]]; then
+        groups=$(id -nG "$ADMIN_USER")
+        [[ " $groups " == *" sudo "* ]] || die "$ADMIN_USER must be a member of the sudo group."
+    fi
+    if [[ "$ALLOW_PASSWORD_LOGIN" == no ]]; then
+        # Key-only login: refuse to continue unless the account has a key to log in with.
+        admin_home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
+        [[ -s "$admin_home/.ssh/authorized_keys" ]] || die "ALLOW_PASSWORD_LOGIN=no: install and test an SSH key for $ADMIN_USER first."
+        ssh-keygen -l -f "$admin_home/.ssh/authorized_keys" >/dev/null 2>&1 || die 'No valid SSH key found for the administrator.'
+    else
+        # Password login: the account must actually have a password ("P" status), or nobody can log in.
+        [[ "$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{ print $2 }')" == P ]] \
+            || die "$ADMIN_USER has no usable password. Set one with: passwd $ADMIN_USER"
+    fi
     /usr/sbin/sshd -t || die 'Current SSH configuration is invalid.'
     sshd_config=$(/usr/sbin/sshd -T)
     grep -qx "port $SSH_PORT" <<< "$sshd_config" || die "SSH_PORT $SSH_PORT does not match the running sshd configuration."
@@ -277,17 +296,21 @@ for r in json.loads(sys.argv[2]):
     printf '\n%-22s %s\n' \
         'Endpoint:' "$PUBLIC_ENDPOINT UDP $VPN_PORT" \
         'WAN interface:' "$WAN_IF (DHCP renewal allowed: $ALLOW_DHCP)" \
-        'SSH:' "port $SSH_PORT as $ADMIN_USER from $( [[ $ADMIN_CIDRS == 0.0.0.0/0 ]] && echo 'anywhere (keys only, Fail2ban in step 3)' || echo "$ADMIN_CIDRS" )" \
+        'SSH:' "port $SSH_PORT as $ADMIN_USER from $( [[ $ADMIN_CIDRS == 0.0.0.0/0 ]] && echo 'anywhere (Fail2ban in step 3)' || echo "$ADMIN_CIDRS" )" \
+        'SSH login:' "root allowed: $ALLOW_ROOT_LOGIN, passwords allowed: $ALLOW_PASSWORD_LOGIN" \
         'SSH from VPN clients:' "$SSH_FROM_VPN" \
         'VPN network:' "$VPN_NET (server $SERVER_IP)" \
         'Client DNS:' "$DNS_IPV4" \
         'First client:' "$( [[ $CLIENT_NAME == none ]] && echo none || echo "$CLIENT_NAME $CLIENT_IP" )"
     echo
     if [[ " $ADMIN_CIDRS " == *" 0.0.0.0/0 "* ]]; then
-        echo 'SSH stays open to the Internet with key-only login. Run setup-fail2ban.sh (step 3) right after'
-        echo 'this to ban brute-force sources; set ADMIN_CIDRS to restrict SSH to known networks instead.'
+        echo 'SSH stays open to the Internet. Run setup-fail2ban.sh (step 3) right after this to ban'
+        echo 'brute-force sources; set ADMIN_CIDRS to restrict SSH to known networks instead.'
     fi
-    confirm 'Have you tested SSH KEY login and sudo in a NEW session as this administrator, and confirmed the host does not need IPv6?'
+    if [[ "$ALLOW_PASSWORD_LOGIN" == yes ]]; then
+        warn 'Password login stays enabled: use a long, unique password. An SSH key is still the safer option.'
+    fi
+    confirm "Can you log in as $ADMIN_USER in a NEW SSH session (with admin rights), and does this host work without IPv6?"
     confirm 'Install packages, harden SSH, disable IPv6, enable forwarding and apply this dedicated-host firewall?'
 }
 
@@ -392,20 +415,24 @@ SYSCTL
     sysctl -p /etc/sysctl.d/99-vpn-setup.conf
     # sshd uses the FIRST value it reads, so this 00- drop-in wins over later files such as
     # 50-cloud-init.conf. Match blocks can still override; the effective check below catches that.
-    cat > /etc/ssh/sshd_config.d/00-vpn-setup.conf <<'SSH'
-# Owned by setup-wireguard-server.sh
+    # Ubuntu's own default is "PermitRootLogin prohibit-password", so root password login needs "yes".
+    cat > /etc/ssh/sshd_config.d/00-vpn-setup.conf <<SSH
+# Owned by setup-wireguard-server.sh (ALLOW_ROOT_LOGIN / ALLOW_PASSWORD_LOGIN)
 PubkeyAuthentication yes
-PasswordAuthentication no
+PasswordAuthentication $ALLOW_PASSWORD_LOGIN
 KbdInteractiveAuthentication no
-PermitRootLogin no
+PermitRootLogin $ALLOW_ROOT_LOGIN
+# Few guesses per connection and a short login window slow down brute force; Fail2ban bans the rest.
 MaxAuthTries 4
+LoginGraceTime 30
 SSH
     chmod 600 /etc/ssh/sshd_config.d/00-vpn-setup.conf
     /usr/sbin/sshd -t
     check_addr=${SSH_CONNECTION%% *}
     [[ -n "$check_addr" ]] || check_addr=192.0.2.1   # any address: the checked settings are global
     effective=$(/usr/sbin/sshd -T -C "user=$ADMIN_USER,host=$check_addr,addr=$check_addr")
-    for setting in 'pubkeyauthentication yes' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'permitrootlogin no'; do
+    for setting in 'pubkeyauthentication yes' "passwordauthentication $ALLOW_PASSWORD_LOGIN" \
+        'kbdinteractiveauthentication no' "permitrootlogin $ALLOW_ROOT_LOGIN"; do
         grep -qx "$setting" <<< "$effective" || die "Earlier SSH policy overrides '$setting'; review the SSH configuration."
     done
     # Ubuntu 24.04+ socket-activates sshd; try-reload works whether or not ssh.service is running.
@@ -446,8 +473,8 @@ apply_firewall() {
     iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment 'vpn: established input' -j ACCEPT
     # Allow ping and the ICMP errors that path-MTU discovery depends on.
     iptables -w -A INPUT -p icmp -m comment --comment 'vpn: ICMP and path MTU' -j ACCEPT
-    # Allow NEW SSH connections from ADMIN_CIDRS (default 0.0.0.0/0 = anywhere). Login is key-only,
-    # and Fail2ban (step 3) inserts its ban chain ahead of this rule to block brute-force sources.
+    # Allow NEW SSH connections from ADMIN_CIDRS (default 0.0.0.0/0 = anywhere). Fail2ban (step 3)
+    # inserts its ban chain ahead of this rule to block brute-force sources.
     for admin in $ADMIN_CIDRS; do
         iptables -w -A INPUT -i "$WAN_IF" -s "$admin" -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
             -m comment --comment 'vpn: SSH access' -j ACCEPT
@@ -538,6 +565,7 @@ write_install_env() {
             "$PUBLIC_ENDPOINT" "$WAN_IF" "$VPN_IF" "$VPN_NET" "$VPN_PORT"
         printf 'SERVER_IP="%s"\nDNS_IPV4="%s"\nADMIN_CIDRS="%s"\nADMIN_USER="%s"\nSSH_PORT="%s"\nSSH_FROM_VPN="%s"\n' \
             "$SERVER_IP" "$DNS_IPV4" "$ADMIN_CIDRS" "$ADMIN_USER" "$SSH_PORT" "$SSH_FROM_VPN"
+        printf 'ALLOW_ROOT_LOGIN="%s"\nALLOW_PASSWORD_LOGIN="%s"\n' "$ALLOW_ROOT_LOGIN" "$ALLOW_PASSWORD_LOGIN"
     } > "$STATE/install.env"
     chmod 600 "$STATE/install.env"
 }
@@ -549,7 +577,7 @@ commit_setup() {
         iptables -w -C INPUT -i "$WAN_IF" -s "$admin" -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
             -m comment --comment 'vpn: SSH access' -j ACCEPT || die 'SSH access rule is missing.'
     done
-    printf '\nOpen a NEW SSH key session as %s on port %s and test sudo now. Keep this session open.\n' "$ADMIN_USER" "$SSH_PORT"
+    printf '\nOpen a NEW SSH session as %s on port %s and check you have admin rights. Keep this session open.\n' "$ADMIN_USER" "$SSH_PORT"
     read -r -t 300 -p 'After that succeeds, type CONFIRM to save the firewall and cancel rollback: ' answer \
         || die 'Confirmation timed out.'
     [[ "$answer" == CONFIRM ]] || die 'New-session verification was not confirmed.'

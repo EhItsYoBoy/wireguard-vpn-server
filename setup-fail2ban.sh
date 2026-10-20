@@ -7,7 +7,7 @@
 #
 # The dashboard jail only makes sense when WGDashboard is reached over the VPN
 # (DASHBOARD_ACCESS=vpn). In ssh-tunnel mode every login comes from 127.0.0.1, so the jail is
-# skipped automatically; SSH keys already gate dashboard access.
+# skipped automatically; the SSH login (protected by the sshd jail) already gates dashboard access.
 #
 # Usage: sudo bash setup-fail2ban.sh [--apply] [--config FILE]
 # Default is a dry run that prints every change; pass --apply to make them.
@@ -15,7 +15,7 @@ set -euo pipefail
 
 STATE_FILE=/var/lib/wgdashboard-fail2ban/cursor.json
 WG_INSTALL_ENV=/root/wireguard-setup/install.env
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 

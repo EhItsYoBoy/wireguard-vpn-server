@@ -1,39 +1,40 @@
 # WireGuard VPN server installer
 
-Builds a dedicated Ubuntu 24.04+ WireGuard server with SSH hardening, a commented iptables firewall, an optional WGDashboard web UI, and Fail2ban.
+Builds a dedicated Ubuntu 24.04+ WireGuard server with a configurable SSH login policy, a commented iptables firewall, an optional WGDashboard web UI, and Fail2ban.
 
 | Script | What it does |
 | --- | --- |
 | `install-vpn-server.sh` | Runs the three steps in order, checks the host first, and finishes with a health check |
-| `setup-wireguard-server.sh` | WireGuard (`wg0`), SSH hardening, iptables policy, IP forwarding, IPv6 disabled, unattended upgrades |
+| `setup-wireguard-server.sh` | WireGuard (`wg0`), SSH login policy, iptables policy, IP forwarding, IPv6 disabled, unattended upgrades |
 | `setup-wgdashboard.sh` | Pinned WGDashboard release, preset admin login, systemd service |
 | `setup-fail2ban.sh` | Fail2ban for SSH, plus dashboard logins when the dashboard is reachable over the VPN |
 
 ## Before you start
 
-1. You need a fresh Ubuntu 24.04 (or newer) server with no Docker, UFW rules, or other firewall in use. Have the cloud provider's console open in case you lock yourself out.
-2. Create a non-root sudo user with an SSH key. Test that you can log in and run `sudo` in a new session:
-   ```bash
-   sudo adduser vpnadmin && sudo usermod -aG sudo vpnadmin
-   # on your workstation:
-   ssh-copy-id vpnadmin@<server>
-   ```
+1. You need a fresh Ubuntu 24.04 (or newer) server with no Docker, UFW rules, or other firewall in use. Have the cloud provider's web console open in case you lock yourself out.
+2. Make sure the account you log in with has a strong password: `passwd root` (or that user's name).
 3. In the provider firewall, allow SSH (TCP 22) and the WireGuard UDP port (51820 by default).
+4. Connect over **IPv4**, as root or a sudo user. The installer disables IPv6.
 
-By default SSH is reachable from anywhere. Login is key-only, and Fail2ban bans any address that racks up failed attempts: 5 within 10 minutes earns a 1-hour ban, growing to 1 week for repeat offenders. To restrict SSH to known networks instead, set `ADMIN_CIDRS` in the config file.
-4. Connect over **IPv4** as that user. The installer disables IPv6.
+**SSH defaults:**
+- **Who can connect:** SSH stays reachable from anywhere.
+- **Root login** stays allowed.
+- **Logins:** passwords and SSH keys both work.
+- **Fail2ban** bans any address that racks up failed attempts. Five failures within 10 minutes earns a 1-hour ban, growing to 1 week for repeat offenders.
+
+To tighten this later, set these in the config file: `ALLOW_ROOT_LOGIN=no`, `ALLOW_PASSWORD_LOGIN=no` (key-only), or `ADMIN_CIDRS` (only known networks).
 
 ## Install
 
 ```bash
-BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0
+BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0
 curl -fsSLO "$BASE/install-vpn-server.sh"
 curl -fsSLO "$BASE/vpn-server.conf.example"
 cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # at least PUBLIC_ENDPOINT
 sudo bash install-vpn-server.sh --config vpn-server.conf
 ```
 
-> **Status:** v0.2.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
+> **Status:** v0.3.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
 
 Do **not** use `curl ... | sudo bash`. The WireGuard step reads confirmations from the keyboard, and piping takes the keyboard away.
 
@@ -63,7 +64,7 @@ sudo vpn-firewall-save                      # save firewall changes; never use '
 2. Regenerate the checksums **after** that edit, then commit, tag and push:
    ```bash
    sha256sum setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh install-vpn-server.sh > SHA256SUMS
-   git add -A && git commit -m "Release v0.2.0" && git tag v0.2.0 && git push origin main --tags
+   git add -A && git commit -m "Release v0.4.0" && git tag v0.4.0 && git push origin main --tags
    ```
 
 Always install from a tag, never from `main`. Never move or re-push an existing tag: servers that pinned it would get different code.
