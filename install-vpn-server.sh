@@ -8,7 +8,7 @@
 # Steps that already completed are skipped, so it is safe to re-run after fixing a failure.
 #
 # Usage (on the server, in an interactive SSH session; do NOT pipe into bash, step 1 needs the keyboard):
-#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.1.0/install-vpn-server.sh
+#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0/install-vpn-server.sh
 #   sudo bash install-vpn-server.sh [--config FILE] [--check] [--skip-dashboard]
 #
 #   --config FILE     shared KEY=VALUE settings for all steps (see vpn-server.conf.example)
@@ -21,7 +21,7 @@ set -euo pipefail
 umask 077
 
 # Raw GitHub URL of the tagged release holding these scripts. Pin a tag or commit, never a branch.
-VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.1.0}"
+VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0}"
 # Optional: sha256 of the SHA256SUMS file itself, so a changed release is refused.
 VPN_SCRIPTS_SHA256="${VPN_SCRIPTS_SHA256:-}"
 
@@ -166,7 +166,7 @@ health_check() {
     rules=$(iptables -w -S 2>/dev/null || true)
     check 'INPUT policy DROP' grep -qx -- '-P INPUT DROP' <<< "$rules"
     check 'FORWARD policy DROP' grep -qx -- '-P FORWARD DROP' <<< "$rules"
-    check 'SSH admin rule present' grep -q 'vpn: trusted SSH admin' <<< "$rules"
+    check 'SSH access rule present' grep -q 'vpn: SSH access' <<< "$rules"
     check 'NAT rule present' bash -c "iptables -w -t nat -S | grep -q 'vpn: NAT only VPN to WAN'"
     check 'netfilter-persistent enabled' systemctl is-enabled netfilter-persistent
     check 'saved rules include the VPN policy' grep -q 'vpn: Internet exit' /etc/iptables/rules.v4

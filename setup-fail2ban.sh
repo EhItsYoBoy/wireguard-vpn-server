@@ -28,7 +28,7 @@ then $WG_INSTALL_ENV, then auto-detection:
   SSH_PORT          port(s) to ban on            (default: from 'sshd -T', else 22)
   WGDASHBOARD_DB    path to wgdashboard_log.db   (default: searched in common install paths)
   WGDASHBOARD_PORT  dashboard port(s)            (default: app_port in wg-dashboard.ini, else 10086)
-  IGNORE_IPS        IPs/CIDRs never banned       (default: loopback + ADMIN_CIDRS)
+  IGNORE_IPS        IPs/CIDRs never banned       (default: loopback + ADMIN_CIDRS, except 0.0.0.0/0)
   BANACTION         fail2ban ban action          (default: iptables-multiport, or
                                                   nftables-multiport when iptables is absent)
   SKIP_DASHBOARD    1 = SSH jail only, 0 = force the dashboard jail
@@ -108,7 +108,13 @@ dashboard_setting() {
 
 SSH_PORT="${SSH_PORT:-$(detect_ssh_ports)}"
 SSH_PORT="${SSH_PORT:-22}"
-IGNORE_IPS="${IGNORE_IPS:-127.0.0.1/8 ::1${ADMIN_CIDRS:+ $ADMIN_CIDRS}}"
+# Never ban loopback or specific admin networks. A /0 entry ("SSH from anywhere") is left out:
+# ignoring it would exempt every address and Fail2ban would never ban anyone.
+trusted=""
+for cidr in $ADMIN_CIDRS; do
+ [[ "$cidr" == */0 ]] || trusted+=" $cidr"
+done
+IGNORE_IPS="${IGNORE_IPS:-127.0.0.1/8 ::1$trusted}"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-auto}"
 
 if [[ "$SKIP_DASHBOARD" != 1 ]]; then
@@ -250,7 +256,9 @@ write_file /etc/fail2ban/jail.d/sshd.local 0644 <<EOF
 [sshd]
 enabled = true
 port = $SSH_PORT
-filter = sshd
+# aggressive also counts pre-auth failures (no matching key, bad key exchange, scanners), which is
+# what brute-force attempts look like when password login is disabled.
+filter = sshd[mode=aggressive]
 backend = systemd
 maxretry = 5
 EOF

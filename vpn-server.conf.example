@@ -7,8 +7,8 @@
 # Public IPv4 or DNS name that clients connect to (required).
 PUBLIC_ENDPOINT=vpn.example.net
 
-# IPv4 hosts/networks allowed to SSH in, space-separated. Default: the IP of your current SSH session.
-# Include every admin location; anything else is dropped by the firewall.
+# IPv4 networks allowed to SSH in, space-separated. Default: 0.0.0.0/0 (anywhere). Login is key-only
+# and Fail2ban bans brute-force sources. Listing specific networks instead also exempts them from bans.
 #ADMIN_CIDRS="198.51.100.10/32 203.0.113.0/28"
 
 # yes = also allow SSH from VPN clients: a way back in if your public IP changes.
@@ -20,7 +20,7 @@ PUBLIC_ENDPOINT=vpn.example.net
 # Default: the running sshd port. This suite never changes it.
 #SSH_PORT=22
 
-# Default: the interface of the default route.
+# Default: auto-detected (the interface used to reach the Internet). Set it only if detection fails.
 #WAN_IF=ens3
 # Private /24 that must not overlap any network you or your clients use.
 #VPN_NET=10.77.0.0/24
@@ -50,6 +50,7 @@ PUBLIC_ENDPOINT=vpn.example.net
 # The password is prompted for during install (or set DASHBOARD_PASSWORD in the environment).
 
 # ----- Step 3: Fail2ban -----
-# Never banned. Default: loopback plus ADMIN_CIDRS.
+# Never banned. Default: loopback plus any specific ADMIN_CIDRS (never 0.0.0.0/0).
+# Add a static office/home IP here so a typo can never ban you.
 #IGNORE_IPS="127.0.0.1/8 ::1 198.51.100.10/32"
 #BANACTION=iptables-multiport

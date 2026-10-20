@@ -18,20 +18,22 @@ Builds a dedicated Ubuntu 24.04+ WireGuard server with SSH hardening, a commente
    # on your workstation:
    ssh-copy-id vpnadmin@<server>
    ```
-3. In the provider firewall, allow SSH from your IP and the WireGuard UDP port (51820 by default).
+3. In the provider firewall, allow SSH (TCP 22) and the WireGuard UDP port (51820 by default).
+
+By default SSH is reachable from anywhere. Login is key-only, and Fail2ban bans any address that racks up failed attempts: 5 within 10 minutes earns a 1-hour ban, growing to 1 week for repeat offenders. To restrict SSH to known networks instead, set `ADMIN_CIDRS` in the config file.
 4. Connect over **IPv4** as that user. The installer disables IPv6.
 
 ## Install
 
 ```bash
-BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.1.0
+BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.2.0
 curl -fsSLO "$BASE/install-vpn-server.sh"
 curl -fsSLO "$BASE/vpn-server.conf.example"
 cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # at least PUBLIC_ENDPOINT
 sudo bash install-vpn-server.sh --config vpn-server.conf
 ```
 
-> **Status:** v0.1.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
+> **Status:** v0.2.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
 
 Do **not** use `curl ... | sudo bash`. The WireGuard step reads confirmations from the keyboard, and piping takes the keyboard away.
 

@@ -17,8 +17,8 @@ set -euo pipefail
 umask 077
 
 PUBLIC_ENDPOINT="${PUBLIC_ENDPOINT:-}"     # Public IPv4 or DNS name clients connect to
-WAN_IF="${WAN_IF:-}"                       # Auto-detected from the default route
-ADMIN_CIDRS="${ADMIN_CIDRS:-${ADMIN_IP:-}}" # IPv4 hosts/networks allowed to SSH; default: your current SSH source
+WAN_IF="${WAN_IF:-}"                       # Auto-detected from the route to the Internet
+ADMIN_CIDRS="${ADMIN_CIDRS:-${ADMIN_IP:-}}" # IPv4 networks allowed to SSH; default 0.0.0.0/0 (anywhere, Fail2ban-protected)
 ADMIN_USER="${ADMIN_USER:-}"               # Existing non-root sudo user with a tested SSH key; default: $SUDO_USER
 SSH_PORT="${SSH_PORT:-}"                   # Existing sshd port (not changed); default: from 'sshd -T'
 SSH_FROM_VPN="${SSH_FROM_VPN:-}"           # yes = also allow SSH from VPN clients (backup path if your IP changes)
@@ -96,13 +96,24 @@ host_check() {
     command -v systemctl >/dev/null || die 'systemd is required.'
 }
 
+# Print the interface that carries Internet traffic. Reads the "dev" field instead of a fixed
+# column, which also handles VPS layouts such as "default dev venet0 scope link" and multipath routes.
+detect_wan_if() {
+    local route candidates
+    route=$(ip -4 route get 1.1.1.1 2>/dev/null || true)
+    [[ -n "$route" ]] || route=$(ip -4 route show default 2>/dev/null || true)
+    awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' <<< "$route" | grep . && return 0
+    # No usable route: accept the only non-loopback interface that has an IPv4 address.
+    candidates=$(ip -4 -o address show scope global 2>/dev/null | awk '{ print $2 }' | sort -u)
+    [[ $(wc -l <<< "$candidates") -eq 1 && -n "$candidates" ]] && echo "$candidates"
+    return 0
+}
+
 collect_settings() {
     local sshd_config wan_addresses
-    WAN_IF=${WAN_IF:-$(ip -4 route show default | awk 'NR==1 {print $5}')}
+    WAN_IF=${WAN_IF:-$(detect_wan_if)}
     ADMIN_USER=${ADMIN_USER:-${SUDO_USER:-}}
-    if [[ -z "$ADMIN_CIDRS" && -n ${SSH_CONNECTION:-} ]]; then
-        ADMIN_CIDRS="${SSH_CONNECTION%% *}/32"
-    fi
+    ADMIN_CIDRS=${ADMIN_CIDRS:-0.0.0.0/0}
     if [[ -z "$SSH_PORT" ]]; then
         sshd_config=$(/usr/sbin/sshd -T 2>/dev/null || true)
         SSH_PORT=$(awk '$1 == "port" && !found { print $2; found = 1 }' <<< "$sshd_config")
@@ -119,8 +130,11 @@ collect_settings() {
     CLIENT_NAME=${CLIENT_NAME:-client1}
 
     ask_if_missing PUBLIC_ENDPOINT 'Public VPN IPv4 or DNS hostname'
-    ask_if_missing WAN_IF 'WAN interface'
-    ask_if_missing ADMIN_CIDRS 'Administrator IPv4 address(es) allowed to SSH, space-separated'
+    if [[ -z "$WAN_IF" ]]; then
+        echo 'Could not detect the WAN interface. Interfaces with IPv4 addresses:'
+        ip -4 -brief address show | grep -v '^lo ' || true
+    fi
+    ask_if_missing WAN_IF 'WAN interface (the one with the public IP)'
     ask_if_missing ADMIN_USER 'Existing non-root sudo administrator'
     validate_values
     NET_BASE=${VPN_NET%.*}
@@ -263,14 +277,15 @@ for r in json.loads(sys.argv[2]):
     printf '\n%-22s %s\n' \
         'Endpoint:' "$PUBLIC_ENDPOINT UDP $VPN_PORT" \
         'WAN interface:' "$WAN_IF (DHCP renewal allowed: $ALLOW_DHCP)" \
-        'SSH:' "port $SSH_PORT as $ADMIN_USER from $ADMIN_CIDRS" \
+        'SSH:' "port $SSH_PORT as $ADMIN_USER from $( [[ $ADMIN_CIDRS == 0.0.0.0/0 ]] && echo 'anywhere (keys only, Fail2ban in step 3)' || echo "$ADMIN_CIDRS" )" \
         'SSH from VPN clients:' "$SSH_FROM_VPN" \
         'VPN network:' "$VPN_NET (server $SERVER_IP)" \
         'Client DNS:' "$DNS_IPV4" \
         'First client:' "$( [[ $CLIENT_NAME == none ]] && echo none || echo "$CLIENT_NAME $CLIENT_IP" )"
     echo
     if [[ " $ADMIN_CIDRS " == *" 0.0.0.0/0 "* ]]; then
-        warn 'ADMIN_CIDRS includes 0.0.0.0/0: SSH will be reachable from the whole Internet (keys only).'
+        echo 'SSH stays open to the Internet with key-only login. Run setup-fail2ban.sh (step 3) right after'
+        echo 'this to ban brute-force sources; set ADMIN_CIDRS to restrict SSH to known networks instead.'
     fi
     confirm 'Have you tested SSH KEY login and sudo in a NEW session as this administrator, and confirmed the host does not need IPv6?'
     confirm 'Install packages, harden SSH, disable IPv6, enable forwarding and apply this dedicated-host firewall?'
@@ -388,7 +403,7 @@ SSH
     chmod 600 /etc/ssh/sshd_config.d/00-vpn-setup.conf
     /usr/sbin/sshd -t
     check_addr=${SSH_CONNECTION%% *}
-    [[ -n "$check_addr" ]] || check_addr=${ADMIN_CIDRS%%/*}
+    [[ -n "$check_addr" ]] || check_addr=192.0.2.1   # any address: the checked settings are global
     effective=$(/usr/sbin/sshd -T -C "user=$ADMIN_USER,host=$check_addr,addr=$check_addr")
     for setting in 'pubkeyauthentication yes' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'permitrootlogin no'; do
         grep -qx "$setting" <<< "$effective" || die "Earlier SSH policy overrides '$setting'; review the SSH configuration."
@@ -431,10 +446,11 @@ apply_firewall() {
     iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment 'vpn: established input' -j ACCEPT
     # Allow ping and the ICMP errors that path-MTU discovery depends on.
     iptables -w -A INPUT -p icmp -m comment --comment 'vpn: ICMP and path MTU' -j ACCEPT
-    # Allow NEW SSH connections only from the trusted administrator networks.
+    # Allow NEW SSH connections from ADMIN_CIDRS (default 0.0.0.0/0 = anywhere). Login is key-only,
+    # and Fail2ban (step 3) inserts its ban chain ahead of this rule to block brute-force sources.
     for admin in $ADMIN_CIDRS; do
         iptables -w -A INPUT -i "$WAN_IF" -s "$admin" -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-            -m comment --comment 'vpn: trusted SSH admin' -j ACCEPT
+            -m comment --comment 'vpn: SSH access' -j ACCEPT
     done
     # Optional backup path: SSH from connected VPN clients, useful when an admin's public IP changes.
     if [[ "$SSH_FROM_VPN" == yes ]]; then
@@ -531,7 +547,7 @@ commit_setup() {
     systemctl is-active --quiet "$VPN_SERVICE" || die "$VPN_SERVICE failed to start."
     for admin in $ADMIN_CIDRS; do
         iptables -w -C INPUT -i "$WAN_IF" -s "$admin" -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-            -m comment --comment 'vpn: trusted SSH admin' -j ACCEPT || die 'SSH admin rule is missing.'
+            -m comment --comment 'vpn: SSH access' -j ACCEPT || die 'SSH access rule is missing.'
     done
     printf '\nOpen a NEW SSH key session as %s on port %s and test sudo now. Keep this session open.\n' "$ADMIN_USER" "$SSH_PORT"
     read -r -t 300 -p 'After that succeeds, type CONFIRM to save the firewall and cancel rollback: ' answer \
