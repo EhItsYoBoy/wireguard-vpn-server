@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup-wgdashboard.sh — step 2 of 3 (see install-vpn-server.sh)
 #
-# Installs a pinned WGDashboard release for the wg0 server created by setup-wireguard-server.sh,
+# Installs a pinned WGDashboard release for the WireGuard server created by setup-wireguard-server.sh,
 # preseeds the admin credentials (upstream defaults to admin/admin and a first-run wizard), and
 # runs it as a systemd service. Safe to re-run: it reconfigures an existing install in place.
 #
@@ -9,7 +9,7 @@
 #   ssh-tunnel  (default) listen on 127.0.0.1 only. Reach it from your workstation with
 #               ssh -N -L 10086:127.0.0.1:10086 <admin>@<server>  then browse http://127.0.0.1:10086
 #   vpn         listen on the VPN server address (e.g. 10.77.0.1). iptables admits only
-#               DASHBOARD_ALLOWED_CIDRS arriving on wg0, and Fail2ban can ban password guessers.
+#               DASHBOARD_ALLOWED_CIDRS arriving on the VPN interface, and Fail2ban can ban password guessers.
 #
 # Usage: sudo bash setup-wgdashboard.sh [--config FILE] [--reset-password]
 # The password comes from DASHBOARD_PASSWORD in the environment or a hidden prompt; leave the
@@ -38,7 +38,7 @@ SERVICE="wg-dashboard.service"
 STATE="/root/wgdashboard-setup"
 WG_INSTALL_ENV="/root/wireguard-setup/install.env"
 FIREWALL_COMMENT="vpn: WGDashboard from VPN"
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 RESET_PASSWORD=0
@@ -81,8 +81,11 @@ host_check() {
         || die 'Supported target: Ubuntu 24.04 LTS or newer.'
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null \
         || die 'WGDashboard needs Python 3.12 or newer.'
-    [[ -s /etc/wireguard/wg0.conf ]] || die 'Run setup-wireguard-server.sh first (/etc/wireguard/wg0.conf missing).'
-    systemctl is-active --quiet wg-quick@wg0 || die 'wg-quick@wg0 is not running.'
+    # The server interface name (wg0, or wgN beside an existing client tunnel) comes from step 1.
+    [[ ! -r "$WG_INSTALL_ENV" ]] || load_config "$WG_INSTALL_ENV" "VPN_IF" 0
+    VPN_IF=${VPN_IF:-wg0}
+    [[ -s "/etc/wireguard/$VPN_IF.conf" ]] || die "Run setup-wireguard-server.sh first (/etc/wireguard/$VPN_IF.conf missing)."
+    systemctl is-active --quiet "wg-quick@$VPN_IF" || die "wg-quick@$VPN_IF is not running."
 }
 
 collect_settings() {
@@ -266,13 +269,13 @@ PY
 
 write_service() {
     step "Installing $SERVICE"
-    # Based on upstream src/wg-dashboard.service, ordered after wg0 so a VPN-address bind succeeds.
+    # Based on upstream src/wg-dashboard.service, ordered after the VPN interface so a VPN-address bind succeeds.
     cat > "/etc/systemd/system/$SERVICE" <<EOF
 # Managed by setup-wgdashboard.sh (based on upstream src/wg-dashboard.service)
 [Unit]
 Description=WGDashboard web interface for WireGuard
-After=network-online.target wg-quick@wg0.service
-Wants=network-online.target wg-quick@wg0.service
+After=network-online.target wg-quick@$VPN_IF.service
+Wants=network-online.target wg-quick@$VPN_IF.service
 ConditionPathIsDirectory=/etc/wireguard
 
 [Service]
@@ -369,8 +372,8 @@ main() {
         esac
         shift
     done
-    host_check
     [[ -z "$config" ]] || load_config "$config" "$SUITE_KEYS" 1
+    host_check
     collect_settings
     choose_password
     install_packages

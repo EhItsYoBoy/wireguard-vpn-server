@@ -5,7 +5,9 @@
 #   * sets the SSH login policy (root and password logins configurable; Fail2ban protects them)
 #   * applies a commented iptables policy (default deny, VPN Internet exit, client isolation)
 #   * enables IPv4 forwarding and disables IPv6
-#   * creates wg0 and, optionally, the first client profile
+#   * creates the server interface (wg0, or the next free wgN when an existing WireGuard client
+#     already uses wg0; other configs in /etc/wireguard are left untouched) and, optionally,
+#     the first client profile
 #
 # Safety: before touching the network it arms a 10-minute automatic rollback of the firewall,
 # SSH and sysctl changes. The rollback is cancelled only after you confirm a NEW SSH session works.
@@ -31,11 +33,11 @@ ALLOW_DHCP="${ALLOW_DHCP:-}"               # yes/no; default: yes if the WAN add
 CLIENT_NAME="${CLIENT_NAME:-}"             # First client profile name, or 'none' to add clients later (e.g. WGDashboard)
 CLIENT_PUBLIC_KEY="${CLIENT_PUBLIC_KEY:-}" # Optional client-generated public key; blank = generate the key here
 
-VPN_IF="wg0"
-VPN_SERVICE="wg-quick@wg0"
+VPN_IF="${VPN_IF:-}"                       # Server interface; default: wg0, or the next free wgN
+VPN_SERVICE=""                             # wg-quick@$VPN_IF, set once VPN_IF is chosen
 STATE="/root/wireguard-setup"
 # Every setting used by the install suite, so one shared config file works for all scripts.
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 BACKUP=""
@@ -111,8 +113,23 @@ detect_wan_if() {
     return 0
 }
 
+# Print the first wgN name with neither a config file nor a live interface, so an existing
+# WireGuard client (often wg0) keeps its name and config.
+free_vpn_if() {
+    local n
+    for n in 0 1 2 3 4 5 6 7 8 9; do
+        if [[ ! -e "/etc/wireguard/wg$n.conf" ]] && ! ip link show dev "wg$n" >/dev/null 2>&1; then
+            echo "wg$n"
+            return 0
+        fi
+    done
+}
+
 collect_settings() {
     local sshd_config wan_addresses
+    VPN_IF=${VPN_IF:-$(free_vpn_if)}
+    [[ "$VPN_IF" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || die 'No free WireGuard interface name; set VPN_IF in the config file.'
+    VPN_SERVICE="wg-quick@$VPN_IF"
     WAN_IF=${WAN_IF:-$(detect_wan_if)}
     ALLOW_ROOT_LOGIN=${ALLOW_ROOT_LOGIN:-yes}
     ALLOW_PASSWORD_LOGIN=${ALLOW_PASSWORD_LOGIN:-yes}
@@ -227,16 +244,52 @@ PY
     fi
 }
 
+# Existing WireGuard configs (for example a client tunnel this VPS uses) may stay, as long as
+# they cannot collide with the new server interface or carry all of the server's traffic.
+check_existing_wireguard() {
+    local conf others=() wan_details
+    [[ ! -e "/etc/wireguard/$VPN_IF.conf" ]] || die "/etc/wireguard/$VPN_IF.conf already exists; set VPN_IF to a free name."
+    ! ip link show dev "$VPN_IF" >/dev/null 2>&1 || die "Interface $VPN_IF already exists; set VPN_IF to a free name."
+    for conf in /etc/wireguard/*.conf; do
+        [[ -e "$conf" ]] && others+=("$conf")
+    done
+    (( ${#others[@]} )) || return 0
+    printf 'Existing WireGuard config(s), left untouched: %s\n' "${others[*]##*/}"
+    # A full-tunnel client (AllowedIPs 0.0.0.0/0) routes the server's own replies into that tunnel,
+    # breaking SSH and the VPN service for everyone.
+    if grep -Eiq '^[[:space:]]*AllowedIPs[[:space:]]*=.*(^|[^0-9])0\.0\.0\.0/0' "${others[@]}"; then
+        die "An existing WireGuard config routes ALL traffic (AllowedIPs = 0.0.0.0/0): ${others[*]##*/}. Use split tunnelling (list only the networks it needs) or a separate VPS."
+    fi
+    wan_details=$(ip -d link show dev "$WAN_IF" 2>/dev/null || true)
+    [[ "$wan_details" != *wireguard* ]] || die "Internet traffic currently leaves through WireGuard interface $WAN_IF; this server needs a direct WAN."
+    # The new VPN subnet must not overlap any address an existing tunnel uses (even while it is down).
+    python3 - "$VPN_NET" "${others[@]}" <<'PY' || die 'Choose a VPN_NET that does not overlap the existing WireGuard config.'
+import ipaddress, re, sys
+net = ipaddress.ip_network(sys.argv[1])
+for path in sys.argv[2:]:
+    for line in open(path, encoding='utf-8', errors='replace'):
+        m = re.match(r'\s*(Address|AllowedIPs)\s*=\s*(.+)', line, re.I)
+        if not m:
+            continue
+        for item in m.group(2).split(','):
+            try:
+                other = ipaddress.ip_network(item.strip(), strict=False)
+            except ValueError:
+                continue
+            if other.version == 4 and other.prefixlen and net.overlaps(other):
+                sys.exit(f'VPN_NET {net} overlaps {other} in {path}')
+PY
+}
+
 preflight() {
-    local directory unit existing groups admin_home sshd_config routes
+    local unit existing groups admin_home sshd_config routes
     [[ ! -e "$STATE" ]] || die "$STATE exists. This is a first-install script; inspect it instead of rerunning."
     [[ ! -e /etc/sysctl.d/99-vpn-setup.conf && ! -e /etc/ssh/sshd_config.d/00-vpn-setup.conf ]] \
         || die 'A file owned by this installer already exists.'
-    for directory in /etc/wireguard /etc/openvpn/server; do
-        if [[ -d "$directory" ]] && [[ -n $(find "$directory" -mindepth 1 -print -quit) ]]; then
-            die "Existing files in $directory; refusing replacement."
-        fi
-    done
+    if [[ -d /etc/openvpn/server ]] && [[ -n $(find /etc/openvpn/server -mindepth 1 -print -quit) ]]; then
+        die 'Existing OpenVPN server files in /etc/openvpn/server; use a dedicated clean host.'
+    fi
+    check_existing_wireguard
     if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
         die 'UFW is active; use a dedicated clean host (this installer replaces UFW with iptables-persistent).'
     fi
@@ -255,6 +308,8 @@ preflight() {
         die 'An existing nftables ruleset exists; review it manually.'
     fi
     ip link show dev "$WAN_IF" >/dev/null 2>&1 || die "WAN interface $WAN_IF does not exist."
+    [[ -z $(ss -Hlun "sport = :$VPN_PORT" 2>/dev/null) ]] \
+        || die "UDP port $VPN_PORT is already in use (an existing WireGuard tunnel?). Set VPN_PORT to a free port."
     id "$ADMIN_USER" >/dev/null 2>&1 || die "User $ADMIN_USER does not exist."
     if [[ "$ADMIN_USER" != root ]]; then
         groups=$(id -nG "$ADMIN_USER")
@@ -299,7 +354,7 @@ for r in json.loads(sys.argv[2]):
         'SSH:' "port $SSH_PORT as $ADMIN_USER from $( [[ $ADMIN_CIDRS == 0.0.0.0/0 ]] && echo 'anywhere (Fail2ban in step 3)' || echo "$ADMIN_CIDRS" )" \
         'SSH login:' "root allowed: $ALLOW_ROOT_LOGIN, passwords allowed: $ALLOW_PASSWORD_LOGIN" \
         'SSH from VPN clients:' "$SSH_FROM_VPN" \
-        'VPN network:' "$VPN_NET (server $SERVER_IP)" \
+        'VPN network:' "$VPN_NET (server $SERVER_IP on $VPN_IF)" \
         'Client DNS:' "$DNS_IPV4" \
         'First client:' "$( [[ $CLIENT_NAME == none ]] && echo none || echo "$CLIENT_NAME $CLIENT_IP" )"
     echo
@@ -502,7 +557,7 @@ apply_firewall() {
     done
     # Allow replies for connections that were permitted to start.
     iptables -w -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment 'vpn: established forwarding' -j ACCEPT
-    # Allow VPN clients to start Internet connections out of the WAN. Client-to-client (wg0 -> wg0)
+    # Allow VPN clients to start Internet connections out of the WAN. Client-to-client (VPN_IF -> VPN_IF)
     # traffic matches no ACCEPT rule, so clients are isolated from each other by the DROP policy.
     iptables -w -A FORWARD -i "$VPN_IF" -o "$WAN_IF" -s "$VPN_NET" -m comment --comment 'vpn: Internet exit' -j ACCEPT
 
@@ -536,7 +591,7 @@ configure_wireguard() {
         printf '# Managed by setup-wireguard-server.sh. Peers may also be added by WGDashboard.\n'
         printf '# Firewall rules live in /etc/iptables (netfilter-persistent), not in PostUp/PostDown.\n'
         printf '[Interface]\nAddress = %s/24\nListenPort = %s\nPrivateKey = %s\n' "$SERVER_IP" "$VPN_PORT" "$server_key"
-    } > /etc/wireguard/wg0.conf
+    } > "/etc/wireguard/$VPN_IF.conf"
     if [[ "$CLIENT_NAME" != none ]]; then
         if [[ -n "$CLIENT_PUBLIC_KEY" ]]; then
             client_public="$CLIENT_PUBLIC_KEY"
@@ -545,7 +600,7 @@ configure_wireguard() {
             client_public=$(wg pubkey <<< "$client_key")
         fi
         printf '\n[Peer]\n# %s\nPublicKey = %s\nAllowedIPs = %s/32\n' "$CLIENT_NAME" "$client_public" "$CLIENT_IP" \
-            >> /etc/wireguard/wg0.conf
+            >> "/etc/wireguard/$VPN_IF.conf"
         {
             printf '[Interface]\nAddress = %s/32\nPrivateKey = %s\nDNS = %s\n\n' \
                 "$CLIENT_IP" "${client_key:-<KEEP_THE_PRIVATE_KEY_ALREADY_ON_YOUR_CLIENT>}" "$DNS_IPV4"
@@ -553,7 +608,7 @@ configure_wireguard() {
                 "$server_public" "$PUBLIC_ENDPOINT" "$VPN_PORT"
         } > "$STATE/clients/$CLIENT_NAME.conf"
     fi
-    chmod 600 /etc/wireguard/wg0.conf
+    chmod 600 "/etc/wireguard/$VPN_IF.conf"
     systemctl enable --now "$VPN_SERVICE"
 }
 

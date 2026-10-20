@@ -8,7 +8,7 @@
 # Steps that already completed are skipped, so it is safe to re-run after fixing a failure.
 #
 # Usage (on the server, in an interactive SSH session; do NOT pipe into bash, step 1 needs the keyboard):
-#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0/install-vpn-server.sh
+#   curl -fsSLO https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.0/install-vpn-server.sh
 #   sudo bash install-vpn-server.sh [--config FILE] [--check] [--skip-dashboard]
 #
 #   --config FILE     shared KEY=VALUE settings for all steps (see vpn-server.conf.example)
@@ -21,13 +21,13 @@ set -euo pipefail
 umask 077
 
 # Raw GitHub URL of the tagged release holding these scripts. Pin a tag or commit, never a branch.
-VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0}"
+VPN_SCRIPTS_URL="${VPN_SCRIPTS_URL:-https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.0}"
 # Optional: sha256 of the SHA256SUMS file itself, so a changed release is refused.
 VPN_SCRIPTS_SHA256="${VPN_SCRIPTS_SHA256:-}"
 
 STEP_SCRIPTS=(setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh)
 WG_STATE=/root/wireguard-setup
-SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
+SUITE_KEYS="PUBLIC_ENDPOINT WAN_IF VPN_IF ADMIN_CIDRS ADMIN_USER SSH_PORT SSH_FROM_VPN ALLOW_ROOT_LOGIN ALLOW_PASSWORD_LOGIN DNS_IPV4 VPN_NET VPN_PORT
  ALLOW_DHCP CLIENT_NAME CLIENT_PUBLIC_KEY DASHBOARD_VERSION DASHBOARD_ACCESS DASHBOARD_PORT DASHBOARD_USER
  DASHBOARD_ALLOWED_CIDRS IGNORE_IPS BANACTION SKIP_DASHBOARD WGDASHBOARD_DB WGDASHBOARD_PORT"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-}"
@@ -154,11 +154,14 @@ health_check() {
     local rules sshd_config jails listen port
     FAILURES=0
     echo 'WireGuard'
-    check 'wg-quick@wg0 running' systemctl is-active wg-quick@wg0
-    check 'wg-quick@wg0 starts at boot' systemctl is-enabled wg-quick@wg0
-    check 'wg0 interface up' ip link show wg0 up
+    local vpn_if
+    vpn_if=$(awk -F'"' '/^VPN_IF=/ { print $2 }' "$WG_STATE/install.env" 2>/dev/null)
+    vpn_if=${vpn_if:-wg0}
+    check "wg-quick@$vpn_if running" systemctl is-active "wg-quick@$vpn_if"
+    check "wg-quick@$vpn_if starts at boot" systemctl is-enabled "wg-quick@$vpn_if"
+    check "$vpn_if interface up" ip link show "$vpn_if" up
     check '/etc/wireguard is private (700)' test "$(stat -c %a /etc/wireguard 2>/dev/null)" = 700
-    check 'wg0.conf is private (600)' test "$(stat -c %a /etc/wireguard/wg0.conf 2>/dev/null)" = 600
+    check "$vpn_if.conf is private (600)" test "$(stat -c %a "/etc/wireguard/$vpn_if.conf" 2>/dev/null)" = 600
     check 'IPv4 forwarding on' test "$(sysctl -n net.ipv4.ip_forward)" = 1
     check 'IPv6 disabled' test "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1
 

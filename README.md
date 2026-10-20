@@ -12,6 +12,11 @@ Builds a dedicated Ubuntu 24.04+ WireGuard server with a configurable SSH login 
 ## Before you start
 
 1. You need a fresh Ubuntu 24.04 (or newer) server with no Docker, UFW rules, or other firewall in use. Have the cloud provider's web console open in case you lock yourself out.
+
+   An existing **WireGuard client** on the server is fine if it only routes specific networks (split tunnel). The installer leaves its config untouched, puts the server on the next free interface (e.g. `wg1`), and refuses to run if:
+   - the client routes all traffic (`AllowedIPs = 0.0.0.0/0`)
+   - the client's addresses overlap `VPN_NET`
+   - the client already uses UDP port `VPN_PORT`
 2. Make sure the account you log in with has a strong password: `passwd root` (or that user's name).
 3. In the provider firewall, allow SSH (TCP 22) and the WireGuard UDP port (51820 by default).
 4. Connect over **IPv4**, as root or a sudo user. The installer disables IPv6.
@@ -27,14 +32,14 @@ To tighten this later, set these in the config file: `ALLOW_ROOT_LOGIN=no`, `ALL
 ## Install
 
 ```bash
-BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.3.0
+BASE=https://raw.githubusercontent.com/EhItsYoBoy/wireguard-vpn-server/v0.4.0
 curl -fsSLO "$BASE/install-vpn-server.sh"
 curl -fsSLO "$BASE/vpn-server.conf.example"
 cp vpn-server.conf.example vpn-server.conf && nano vpn-server.conf     # at least PUBLIC_ENDPOINT
 sudo bash install-vpn-server.sh --config vpn-server.conf
 ```
 
-> **Status:** v0.3.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
+> **Status:** v0.4.0 has not yet been run end to end on a real server. Test it on a disposable Ubuntu 24.04 VM before relying on it.
 
 Do **not** use `curl ... | sudo bash`. The WireGuard step reads confirmations from the keyboard, and piping takes the keyboard away.
 
@@ -64,7 +69,7 @@ sudo vpn-firewall-save                      # save firewall changes; never use '
 2. Regenerate the checksums **after** that edit, then commit, tag and push:
    ```bash
    sha256sum setup-wireguard-server.sh setup-wgdashboard.sh setup-fail2ban.sh install-vpn-server.sh > SHA256SUMS
-   git add -A && git commit -m "Release v0.4.0" && git tag v0.4.0 && git push origin main --tags
+   git add -A && git commit -m "Release v0.5.0" && git tag v0.5.0 && git push origin main --tags
    ```
 
 Always install from a tag, never from `main`. Never move or re-push an existing tag: servers that pinned it would get different code.
